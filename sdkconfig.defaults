@@ -43,7 +43,11 @@ CONFIG_IEEE802154_ENABLED=y
 # Enable Matter over Thread transport (maps to CHIP_DEVICE_CONFIG_ENABLE_THREAD).
 # Defined here via Kconfig so CHIPProjectConfig.h does not redefine the same
 # macro with a different token string, which GCC -Werror treats as an error.
+# WiFi must be explicitly disabled: when both Thread and WiFi are present the
+# ConnectivityManagerImpl for Thread-only devices does not implement WiFi-specific
+# methods (GetAndLogWiFiStatsCounters, etc.) causing incomplete-type errors.
 CONFIG_ENABLE_MATTER_OVER_THREAD=y
+CONFIG_ENABLE_MATTER_OVER_WIFI=n
 CONFIG_ESP_MATTER_ENABLE_DATA_MODEL=y
 CONFIG_CHIP_DEVICE_VENDOR_ID=0xFFF1
 CONFIG_CHIP_DEVICE_PRODUCT_ID=0x8001
