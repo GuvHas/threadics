@@ -33,4 +33,4 @@ idf_component_register(
 # Demote -Wdangling-reference from an error for the whole build so the
 # connectedhomeip source tree can compile without patching upstream files.
 # ---------------------------------------------------------------------------
-idf_build_set_property(COMPILE_OPTIONS "-Wno-dangling-reference" APPEND)
+idf_build_set_property(CXX_COMPILE_OPTIONS "-Wno-dangling-reference" APPEND)
