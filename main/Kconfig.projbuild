@@ -1,0 +1,85 @@
+menu "LK ICS2 Matter Bridge Configuration"
+
+    config LK_ICS2_UART_PORT
+        int "RS485 UART Port Number"
+        default 1
+        range 0 2
+        help
+            UART port number connected to the RS485 transceiver.
+            ESP32-C6: UART0 is reserved for console, use UART1.
+
+    config LK_ICS2_UART_TX_PIN
+        int "RS485 UART TX GPIO Pin"
+        default 6
+        range 0 22
+        help
+            GPIO pin for UART TX (connected to RS485 DI pin).
+
+    config LK_ICS2_UART_RX_PIN
+        int "RS485 UART RX GPIO Pin"
+        default 7
+        range 0 22
+        help
+            GPIO pin for UART RX (connected to RS485 RO pin).
+
+    config LK_ICS2_RS485_DE_PIN
+        int "RS485 Driver Enable (DE/RE) GPIO Pin"
+        default 10
+        range 0 22
+        help
+            GPIO pin for RS485 DE/RE (Driver Enable / Receiver Enable).
+            Connect both DE and /RE of the transceiver to this pin.
+            High = transmit, Low = receive.
+
+    config LK_ICS2_MODBUS_BAUD_RATE
+        int "Modbus Baud Rate"
+        default 9600
+        help
+            RS485 Modbus RTU baud rate. The LK ICS 2 default is 9600 baud.
+
+    config LK_ICS2_MODBUS_SLAVE_ADDR
+        int "Modbus Slave Address"
+        default 1
+        range 1 247
+        help
+            Modbus RTU slave address of the LK ICS 2 controller.
+            Default address is 1. Check the ICS 2 configuration.
+
+    config LK_ICS2_NUM_ZONES
+        int "Number of Heating Zones"
+        default 6
+        range 1 12
+        help
+            Number of heating zones to expose as Matter thermostat endpoints.
+            The LK ICS 2 supports up to 12 zones.
+
+    config LK_ICS2_POLL_INTERVAL_MS
+        int "Zone Poll Interval (ms)"
+        default 5000
+        range 1000 60000
+        help
+            How often to poll the LK ICS 2 for temperature and state updates (milliseconds).
+
+    config LK_ICS2_MODBUS_TIMEOUT_MS
+        int "Modbus Response Timeout (ms)"
+        default 500
+        range 100 5000
+        help
+            Timeout waiting for a Modbus RTU response from the LK ICS 2.
+
+    config MATTER_DISCRIMINATOR
+        hex "Matter Discriminator"
+        default 0xF00
+        range 0x000 0xFFF
+        help
+            12-bit Matter discriminator used during BLE commissioning.
+            Change this to a unique value per device.
+
+    config MATTER_PASSCODE
+        int "Matter Setup Passcode"
+        default 20202021
+        help
+            Matter setup passcode for commissioning. Must be a valid
+            Matter passcode (not 00000000, 11111111, etc.).
+
+endmenu

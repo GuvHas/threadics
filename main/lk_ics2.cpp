@@ -1,0 +1,438 @@
+#include "lk_ics2.h"
+
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "driver/uart.h"
+#include "driver/gpio.h"
+#include "esp_log.h"
+#include "esp_err.h"
+
+static const char *TAG = "lk_ics2";
+
+// ============================================================
+// Internal state
+// ============================================================
+
+static lk_ics2_config_t  s_cfg;
+static lk_ics2_zone_t    s_zones[LK_ICS2_MAX_ZONES];
+static SemaphoreHandle_t s_mutex;          // protects s_zones[]
+static TaskHandle_t      s_poll_task;
+
+// ============================================================
+// Modbus RTU helpers
+// ============================================================
+
+// CRC-16/IBM (Modbus)
+static uint16_t modbus_crc16(const uint8_t *data, size_t len)
+{
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++) {
+            if (crc & 0x0001) {
+                crc = (crc >> 1) ^ 0xA001;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    return crc;
+}
+
+// Enable RS485 transmitter (DE high)
+static inline void rs485_tx_enable(void)
+{
+    gpio_set_level((gpio_num_t)s_cfg.de_pin, 1);
+}
+
+// Enable RS485 receiver (DE low)
+static inline void rs485_rx_enable(void)
+{
+    gpio_set_level((gpio_num_t)s_cfg.de_pin, 0);
+}
+
+// Flush UART RX buffer
+static void uart_flush_rx(void)
+{
+    uart_flush_input((uart_port_t)s_cfg.uart_port);
+}
+
+/**
+ * Send a Modbus RTU request and receive the response.
+ *
+ * @param  req      Request bytes (without CRC).
+ * @param  req_len  Length of request without CRC.
+ * @param  rsp      Buffer for response (caller provides).
+ * @param  rsp_max  Maximum bytes to read.
+ * @param  rsp_len  Actual bytes received.
+ * @return ESP_OK on success, error otherwise.
+ */
+static esp_err_t modbus_transaction(const uint8_t *req, size_t req_len,
+                                     uint8_t *rsp, size_t rsp_max, size_t *rsp_len)
+{
+    // Build frame with CRC
+    uint8_t frame[req_len + 2];
+    memcpy(frame, req, req_len);
+    uint16_t crc = modbus_crc16(req, req_len);
+    frame[req_len]     = (uint8_t)(crc & 0xFF);
+    frame[req_len + 1] = (uint8_t)(crc >> 8);
+
+    uart_port_t port = (uart_port_t)s_cfg.uart_port;
+
+    // Flush any stale bytes
+    uart_flush_rx();
+
+    // Enable TX, send frame
+    rs485_tx_enable();
+    int written = uart_write_bytes(port, (const char *)frame, sizeof(frame));
+    // Wait for frame to be clocked out before switching to RX
+    uart_wait_tx_done(port, pdMS_TO_TICKS(100));
+    rs485_rx_enable();
+
+    if (written != (int)sizeof(frame)) {
+        ESP_LOGE(TAG, "UART write failed (%d of %zu bytes)", written, sizeof(frame));
+        return ESP_FAIL;
+    }
+
+    // Read response
+    int received = uart_read_bytes(port, rsp, rsp_max,
+                                   pdMS_TO_TICKS(s_cfg.response_timeout_ms));
+    if (received <= 0) {
+        ESP_LOGW(TAG, "Modbus timeout - no response from slave %d", s_cfg.slave_addr);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    *rsp_len = (size_t)received;
+
+    // Validate CRC on response
+    if (*rsp_len < 4) {
+        ESP_LOGE(TAG, "Response too short (%zu bytes)", *rsp_len);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    uint16_t resp_crc = modbus_crc16(rsp, *rsp_len - 2);
+    uint16_t rcv_crc  = (uint16_t)(rsp[*rsp_len - 2]) | ((uint16_t)(rsp[*rsp_len - 1]) << 8);
+    if (resp_crc != rcv_crc) {
+        ESP_LOGE(TAG, "CRC mismatch (calc=0x%04X, rcvd=0x%04X)", resp_crc, rcv_crc);
+        return ESP_ERR_INVALID_CRC;
+    }
+
+    // Check slave address matches
+    if (rsp[0] != s_cfg.slave_addr) {
+        ESP_LOGE(TAG, "Slave addr mismatch (exp=%d, got=%d)", s_cfg.slave_addr, rsp[0]);
+        return ESP_FAIL;
+    }
+
+    // Check for exception response (FC | 0x80)
+    if (rsp[1] & 0x80) {
+        ESP_LOGE(TAG, "Modbus exception: code=0x%02X", rsp[2]);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    return ESP_OK;
+}
+
+/**
+ * Modbus FC=03 Read Holding Registers.
+ *
+ * @param  start_addr  First register address (0-based).
+ * @param  count       Number of registers.
+ * @param  values      Output array of uint16_t (count elements).
+ */
+static esp_err_t modbus_read_holding(uint16_t start_addr, uint16_t count, uint16_t *values)
+{
+    uint8_t req[6] = {
+        s_cfg.slave_addr,
+        0x03,                            // FC3: Read Holding Registers
+        (uint8_t)(start_addr >> 8),
+        (uint8_t)(start_addr & 0xFF),
+        (uint8_t)(count >> 8),
+        (uint8_t)(count & 0xFF),
+    };
+
+    uint8_t rsp[5 + count * 2];
+    size_t  rsp_len = 0;
+    esp_err_t ret = modbus_transaction(req, sizeof(req), rsp, sizeof(rsp), &rsp_len);
+    if (ret != ESP_OK) return ret;
+
+    uint8_t byte_count = rsp[2];
+    if (byte_count != count * 2) {
+        ESP_LOGE(TAG, "FC03 byte count mismatch (exp=%d, got=%d)", count * 2, byte_count);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    for (uint16_t i = 0; i < count; i++) {
+        values[i] = ((uint16_t)rsp[3 + i * 2] << 8) | rsp[4 + i * 2];
+    }
+    return ESP_OK;
+}
+
+/**
+ * Modbus FC=04 Read Input Registers.
+ */
+static esp_err_t modbus_read_input(uint16_t start_addr, uint16_t count, uint16_t *values)
+{
+    uint8_t req[6] = {
+        s_cfg.slave_addr,
+        0x04,                            // FC4: Read Input Registers
+        (uint8_t)(start_addr >> 8),
+        (uint8_t)(start_addr & 0xFF),
+        (uint8_t)(count >> 8),
+        (uint8_t)(count & 0xFF),
+    };
+
+    uint8_t rsp[5 + count * 2];
+    size_t  rsp_len = 0;
+    esp_err_t ret = modbus_transaction(req, sizeof(req), rsp, sizeof(rsp), &rsp_len);
+    if (ret != ESP_OK) return ret;
+
+    uint8_t byte_count = rsp[2];
+    if (byte_count != count * 2) {
+        ESP_LOGE(TAG, "FC04 byte count mismatch (exp=%d, got=%d)", count * 2, byte_count);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    for (uint16_t i = 0; i < count; i++) {
+        values[i] = ((uint16_t)rsp[3 + i * 2] << 8) | rsp[4 + i * 2];
+    }
+    return ESP_OK;
+}
+
+/**
+ * Modbus FC=06 Write Single Holding Register.
+ */
+static esp_err_t modbus_write_single(uint16_t addr, uint16_t value)
+{
+    uint8_t req[6] = {
+        s_cfg.slave_addr,
+        0x06,                           // FC6: Write Single Register
+        (uint8_t)(addr >> 8),
+        (uint8_t)(addr & 0xFF),
+        (uint8_t)(value >> 8),
+        (uint8_t)(value & 0xFF),
+    };
+
+    uint8_t rsp[8];
+    size_t  rsp_len = 0;
+    return modbus_transaction(req, sizeof(req), rsp, sizeof(rsp), &rsp_len);
+}
+
+// ============================================================
+// Zone polling logic
+// ============================================================
+
+// Convert LK ICS 2 temperature value (0.1°C, signed) to centidegrees (°C x 100)
+static inline int16_t lk_temp_to_cdeg(int16_t lk_val)
+{
+    return (int16_t)(lk_val * 10);   // x0.1°C → x0.01°C (centidegrees)
+}
+
+// Convert centidegrees to LK ICS 2 temperature value (0.1°C)
+static inline int16_t cdeg_to_lk_temp(int16_t cdeg)
+{
+    return (int16_t)(cdeg / 10);     // x0.01°C → x0.1°C
+}
+
+static void poll_zone(uint8_t zone)
+{
+    uint16_t raw[1];
+
+    lk_ics2_zone_t updated;
+    memset(&updated, 0, sizeof(updated));
+
+    // Read room temperature (input register)
+    if (modbus_read_input(LK_REG_ROOM_TEMP_BASE + zone, 1, raw) == ESP_OK) {
+        updated.room_temp_cdeg = lk_temp_to_cdeg((int16_t)raw[0]);
+    } else {
+        ESP_LOGW(TAG, "Zone %d: failed to read room temperature", zone);
+        return;  // Skip this zone if comms failed
+    }
+
+    // Read floor temperature (input register)
+    if (modbus_read_input(LK_REG_FLOOR_TEMP_BASE + zone, 1, raw) == ESP_OK) {
+        updated.floor_temp_cdeg = lk_temp_to_cdeg((int16_t)raw[0]);
+    }
+
+    // Read actuator position (input register)
+    if (modbus_read_input(LK_REG_ACTUATOR_BASE + zone, 1, raw) == ESP_OK) {
+        updated.actuator_pct = (uint8_t)(raw[0] & 0xFF);
+    }
+
+    // Read setpoint (holding register)
+    if (modbus_read_holding(LK_REG_SETPOINT_BASE + zone, 1, raw) == ESP_OK) {
+        updated.setpoint_cdeg = lk_temp_to_cdeg((int16_t)raw[0]);
+    }
+
+    // Read zone mode (holding register)
+    if (modbus_read_holding(LK_REG_ZONE_MODE_BASE + zone, 1, raw) == ESP_OK) {
+        updated.mode = (lk_zone_mode_t)(raw[0] & 0x03);
+    }
+
+    updated.valid = true;
+
+    // Update shared zone data under mutex
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    s_zones[zone] = updated;
+    xSemaphoreGive(s_mutex);
+
+    // Notify caller
+    if (s_cfg.update_cb) {
+        s_cfg.update_cb(zone, &updated, s_cfg.update_cb_ctx);
+    }
+
+    ESP_LOGD(TAG, "Zone %d: room=%.1f°C floor=%.1f°C setpoint=%.1f°C actuator=%d%% mode=%d",
+             zone,
+             updated.room_temp_cdeg  / 100.0f,
+             updated.floor_temp_cdeg / 100.0f,
+             updated.setpoint_cdeg   / 100.0f,
+             updated.actuator_pct,
+             updated.mode);
+}
+
+static void poll_task(void *arg)
+{
+    ESP_LOGI(TAG, "Poll task started - %d zones, interval=%dms",
+             s_cfg.num_zones, (int)s_cfg.poll_interval_ms);
+
+    while (true) {
+        for (uint8_t z = 0; z < s_cfg.num_zones; z++) {
+            poll_zone(z);
+            // Small inter-zone delay to avoid bus congestion
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        vTaskDelay(pdMS_TO_TICKS(s_cfg.poll_interval_ms));
+    }
+}
+
+// ============================================================
+// UART / RS485 initialisation
+// ============================================================
+
+static esp_err_t uart_init(void)
+{
+    uart_config_t uart_cfg = {
+        .baud_rate  = s_cfg.baud_rate,
+        .data_bits  = UART_DATA_8_BITS,
+        .parity     = UART_PARITY_DISABLE,
+        .stop_bits  = UART_STOP_BITS_1,
+        .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+
+    uart_port_t port = (uart_port_t)s_cfg.uart_port;
+
+    ESP_RETURN_ON_ERROR(uart_param_config(port, &uart_cfg), TAG, "uart_param_config failed");
+    ESP_RETURN_ON_ERROR(uart_set_pin(port,
+                                     s_cfg.tx_pin,
+                                     s_cfg.rx_pin,
+                                     UART_PIN_NO_CHANGE,
+                                     UART_PIN_NO_CHANGE),
+                        TAG, "uart_set_pin failed");
+
+    // Install driver with 256-byte RX buffer, no TX buffer (we write synchronously)
+    ESP_RETURN_ON_ERROR(uart_driver_install(port, 256, 0, 0, NULL, 0),
+                        TAG, "uart_driver_install failed");
+
+    // Set RS485 half-duplex mode
+    ESP_RETURN_ON_ERROR(uart_set_mode(port, UART_MODE_RS485_HALF_DUPLEX),
+                        TAG, "uart_set_mode RS485 failed");
+
+    // Configure DE/RE GPIO
+    gpio_config_t gpio_cfg = {
+        .pin_bit_mask = (1ULL << s_cfg.de_pin),
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&gpio_cfg), TAG, "gpio_config DE pin failed");
+    rs485_rx_enable();   // Start in receive mode
+
+    ESP_LOGI(TAG, "RS485 UART%d init: baud=%d TX=%d RX=%d DE=%d",
+             s_cfg.uart_port, s_cfg.baud_rate,
+             s_cfg.tx_pin, s_cfg.rx_pin, s_cfg.de_pin);
+    return ESP_OK;
+}
+
+// ============================================================
+// Public API
+// ============================================================
+
+esp_err_t lk_ics2_init(const lk_ics2_config_t *cfg)
+{
+    if (!cfg || cfg->num_zones == 0 || cfg->num_zones > LK_ICS2_MAX_ZONES) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memcpy(&s_cfg, cfg, sizeof(s_cfg));
+    memset(s_zones, 0, sizeof(s_zones));
+
+    s_mutex = xSemaphoreCreateMutex();
+    if (!s_mutex) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_RETURN_ON_ERROR(uart_init(), TAG, "UART init failed");
+
+    // Start poll task on core 1 (or 0 for unicore), low priority
+    BaseType_t ret = xTaskCreate(poll_task, "lk_ics2_poll",
+                                 4096, NULL, 5, &s_poll_task);
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create poll task");
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "LK ICS 2 driver initialized (%d zones, slave=%d)",
+             s_cfg.num_zones, s_cfg.slave_addr);
+    return ESP_OK;
+}
+
+esp_err_t lk_ics2_get_zone(uint8_t zone, lk_ics2_zone_t *out)
+{
+    if (zone >= s_cfg.num_zones || !out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    *out = s_zones[zone];
+    xSemaphoreGive(s_mutex);
+
+    return out->valid ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+esp_err_t lk_ics2_set_setpoint(uint8_t zone, int16_t setpoint_cdeg)
+{
+    if (zone >= s_cfg.num_zones) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Clamp to reasonable floor heating range: 5°C - 40°C
+    if (setpoint_cdeg < 500)  setpoint_cdeg = 500;
+    if (setpoint_cdeg > 4000) setpoint_cdeg = 4000;
+
+    int16_t lk_val = cdeg_to_lk_temp(setpoint_cdeg);
+    uint16_t reg_addr = LK_REG_SETPOINT_BASE + zone;
+
+    ESP_LOGI(TAG, "Zone %d: writing setpoint %.1f°C (reg=0x%04X val=%d)",
+             zone, setpoint_cdeg / 100.0f, reg_addr, lk_val);
+
+    return modbus_write_single(reg_addr, (uint16_t)lk_val);
+}
+
+esp_err_t lk_ics2_set_zone_mode(uint8_t zone, lk_zone_mode_t mode)
+{
+    if (zone >= s_cfg.num_zones) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint16_t reg_addr = LK_REG_ZONE_MODE_BASE + zone;
+    ESP_LOGI(TAG, "Zone %d: writing mode %d (reg=0x%04X)", zone, mode, reg_addr);
+    return modbus_write_single(reg_addr, (uint16_t)mode);
+}
+
+esp_err_t lk_ics2_set_global_mode(lk_zone_mode_t mode)
+{
+    ESP_LOGI(TAG, "Global: writing mode %d (reg=0x%04X)", mode, LK_REG_GLOBAL_MODE);
+    return modbus_write_single(LK_REG_GLOBAL_MODE, (uint16_t)mode);
+}
