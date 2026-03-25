@@ -11,16 +11,26 @@ jobs:
     name: Compile firmware (ESP32-C6)
     runs-on: ubuntu-latest
 
+    # Use Espressif's pre-built image that ships both ESP-IDF and the
+    # esp-matter SDK ready to use — no manual SDK installation needed.
+    container:
+      image: espressif/esp-matter:latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: false
 
-      - name: Build with esp-idf action
-        uses: espressif/esp-idf-ci-action@v1
-        with:
-          esp_idf_version: v5.3
-          target: esp32c6
-          path: "."
-          command: idf.py build
+      - name: Build firmware
+        shell: bash
+        run: |
+          # Source ESP-IDF and esp-matter environment
+          . "$IDF_PATH/export.sh"
+          . "$ESP_MATTER_PATH/export.sh"
+
+          # Set ESP32-C6 as the build target
+          idf.py set-target esp32c6
+
+          # Full build — exits non-zero on any error, failing the job
+          idf.py build
