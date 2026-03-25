@@ -22,6 +22,11 @@ jobs:
         with:
           submodules: false
 
+      - name: Fix git safe.directory
+        # GitHub Actions checks out code owned by a different UID than the
+        # container user, causing git to refuse rev-parse during the build.
+        run: git config --global --add safe.directory '*'
+
       - name: Build firmware
         shell: bash
         run: |
