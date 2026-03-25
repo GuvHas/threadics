@@ -26,9 +26,11 @@
 // BLE commissioning window
 #define CHIP_DEVICE_CONFIG_BLE_DEVICE_NAME      "LK-ICS2-Bridge"
 
-// Pairing
-#define CHIP_DEVICE_CONFIG_USE_TEST_SETUP_PIN_CODE      1
-#define CHIP_DEVICE_CONFIG_USE_TEST_PAIRING_CODE        "14526-23040"
+// Pairing — value must equal 20202021 exactly; the SDK checks
+// CHIP_DEVICE_CONFIG_USE_TEST_SETUP_PIN_CODE != 20202021 at compile time
+// and raises an #error if a custom passcode is set without a matching
+// Spake2+ verifier.  Use the standard test passcode for development.
+#define CHIP_DEVICE_CONFIG_USE_TEST_SETUP_PIN_CODE      20202021
 
 // Enable persistent storage
 #define CHIP_DEVICE_CONFIG_ENABLE_FACTORY_PROVISIONING  0
