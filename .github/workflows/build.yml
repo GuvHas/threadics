@@ -14,7 +14,10 @@ jobs:
     # Use Espressif's pre-built image that ships both ESP-IDF and the
     # esp-matter SDK ready to use — no manual SDK installation needed.
     container:
-      image: espressif/esp-matter:latest
+      # release-v1.3 (IDF 5.2.3) is the last stable release without the
+      # v1.4 API mismatch between esp_matter_client.cpp and the bundled
+      # connectedhomeip SDK (EncodableToTLV header resolution failure).
+      image: espressif/esp-matter:release-v1.3_idf_v5.2.3
 
     steps:
       - name: Checkout repository

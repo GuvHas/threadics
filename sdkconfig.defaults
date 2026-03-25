@@ -47,7 +47,11 @@ CONFIG_IEEE802154_ENABLED=y
 # ConnectivityManagerImpl for Thread-only devices does not implement WiFi-specific
 # methods (GetAndLogWiFiStatsCounters, etc.) causing incomplete-type errors.
 CONFIG_ENABLE_MATTER_OVER_THREAD=y
-CONFIG_ENABLE_MATTER_OVER_WIFI=n
+# Disable WiFi station in the Matter SDK. This is a Thread-only device;
+# without this, CHIP_DEVICE_CONFIG_ENABLE_WIFI_STATION defaults to 1,
+# causing ConnectivityManagerImpl (Thread-only) to be required to implement
+# WiFi-specific methods it does not have (GetAndLogWiFiStatsCounters, etc.).
+CONFIG_ENABLE_WIFI_STATION=n
 CONFIG_ESP_MATTER_ENABLE_DATA_MODEL=y
 CONFIG_CHIP_DEVICE_VENDOR_ID=0xFFF1
 CONFIG_CHIP_DEVICE_PRODUCT_ID=0x8001
