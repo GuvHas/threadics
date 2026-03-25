@@ -40,6 +40,10 @@ CONFIG_OPENTHREAD_BORDER_ROUTER=n
 CONFIG_IEEE802154_ENABLED=y
 
 # Matter
+# Enable Matter over Thread transport (maps to CHIP_DEVICE_CONFIG_ENABLE_THREAD).
+# Defined here via Kconfig so CHIPProjectConfig.h does not redefine the same
+# macro with a different token string, which GCC -Werror treats as an error.
+CONFIG_ENABLE_MATTER_OVER_THREAD=y
 CONFIG_ESP_MATTER_ENABLE_DATA_MODEL=y
 CONFIG_CHIP_DEVICE_VENDOR_ID=0xFFF1
 CONFIG_CHIP_DEVICE_PRODUCT_ID=0x8001

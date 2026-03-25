@@ -2,49 +2,36 @@
 
 // ============================================================
 // Matter (CHIP) Project Configuration for LK ICS2 Bridge
+//
+// IMPORTANT — keep this file minimal.
+//
+// esp-matter maps many CHIP_DEVICE_CONFIG_* macros directly to
+// Kconfig symbols (e.g. CHIP_DEVICE_CONFIG_ENABLE_THREAD becomes
+// CONFIG_ENABLE_MATTER_OVER_THREAD).  If we redefine the same macro
+// here, GCC warns about the token-string mismatch and -Werror turns
+// that warning into a hard build error.
+//
+// Rule: only define things here that have NO Kconfig equivalent in
+// esp-matter.  Everything else belongs in sdkconfig.defaults.
+// Use #ifndef guards so the SDK's value always wins if it exists.
 // ============================================================
-
-// Device identity
-#define CHIP_DEVICE_CONFIG_DEVICE_VENDOR_ID     0xFFF1  // Test vendor (replace with real VID)
-#define CHIP_DEVICE_CONFIG_DEVICE_PRODUCT_ID    0x8001  // Product ID
-
-// Device type: Thermostat bridge
-#define CHIP_DEVICE_CONFIG_DEVICE_TYPE          0x0301  // Thermostat
-
-// Firmware version
-#define CHIP_DEVICE_CONFIG_DEVICE_FIRMWARE_REVISION     "1.0.0"
-#define CHIP_DEVICE_CONFIG_DEVICE_FIRMWARE_REVISION_STRING "1.0.0"
-
-// Enable Thread as network transport
-#define CHIP_DEVICE_CONFIG_ENABLE_THREAD        1
-#define CHIP_DEVICE_CONFIG_THREAD_FTD           1
-
-// Disable WiFi (using Thread only on ESP32-C6)
-#define CHIP_DEVICE_CONFIG_ENABLE_WIFI_STATION  0
-#define CHIP_DEVICE_CONFIG_ENABLE_WIFI_AP       0
-
-// BLE commissioning window
-#define CHIP_DEVICE_CONFIG_BLE_DEVICE_NAME      "LK-ICS2-Bridge"
-
-// Pairing — value must equal 20202021 exactly; the SDK checks
-// CHIP_DEVICE_CONFIG_USE_TEST_SETUP_PIN_CODE != 20202021 at compile time
-// and raises an #error if a custom passcode is set without a matching
-// Spake2+ verifier.  Use the standard test passcode for development.
-#define CHIP_DEVICE_CONFIG_USE_TEST_SETUP_PIN_CODE      20202021
-
-// Enable persistent storage
-#define CHIP_DEVICE_CONFIG_ENABLE_FACTORY_PROVISIONING  0
 
 // Logging
 #ifndef CHIP_DEVICE_CONFIG_LOG_PROVISIONING
-#define CHIP_DEVICE_CONFIG_LOG_PROVISIONING  1
+#define CHIP_DEVICE_CONFIG_LOG_PROVISIONING     1
 #endif
 
-// Failsafe timeout
-#define CHIP_DEVICE_CONFIG_FAILSAFE_EXPIRY_LENGTH       60
+// Failsafe window (seconds).  No direct Kconfig equivalent.
+#ifndef CHIP_DEVICE_CONFIG_FAILSAFE_EXPIRY_LENGTH
+#define CHIP_DEVICE_CONFIG_FAILSAFE_EXPIRY_LENGTH   60
+#endif
 
-// Max fabrics
+// Maximum number of commissioner fabrics.  No direct Kconfig equivalent.
+#ifndef CHIP_CONFIG_MAX_FABRICS
 #define CHIP_CONFIG_MAX_FABRICS                 5
+#endif
 
-// Thread network
-#define CHIP_DEVICE_CONFIG_THREAD_TASK_STACK_SIZE       8192
+// Thread task stack size (bytes).  No direct Kconfig equivalent.
+#ifndef CHIP_DEVICE_CONFIG_THREAD_TASK_STACK_SIZE
+#define CHIP_DEVICE_CONFIG_THREAD_TASK_STACK_SIZE   8192
+#endif
