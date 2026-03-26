@@ -1,0 +1,4 @@
+dependencies:
+  # Let the component manager resolve compatible transitive deps
+  # (including esp_insights / esp_diagnostics) to avoid manual version conflicts.
+  espressif/esp_matter: "^1.4.0"
