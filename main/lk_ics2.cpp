@@ -243,7 +243,19 @@ static esp_err_t modbus_write_single(uint16_t addr, uint16_t value)
 
     uint8_t rsp[8];
     size_t  rsp_len = 0;
-    return modbus_transaction(req, sizeof(req), rsp, sizeof(rsp), &rsp_len);
+    esp_err_t ret = modbus_transaction(req, sizeof(req), rsp, sizeof(rsp), &rsp_len);
+    if (ret != ESP_OK) return ret;
+
+    // FC06 normal response echoes the request exactly (function code, register
+    // address, and written value).  Validate this so a corrupted or stale
+    // response on a noisy RS485 bus is not silently treated as success.
+    if (rsp_len != 8 || rsp[1] != 0x06 ||
+        rsp[2] != req[2] || rsp[3] != req[3] ||
+        rsp[4] != req[4] || rsp[5] != req[5]) {
+        ESP_LOGE(TAG, "FC06 echo mismatch (len=%u fc=0x%02X)", (unsigned)rsp_len, rsp[1]);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    return ESP_OK;
 }
 
 // ============================================================
@@ -450,7 +462,15 @@ esp_err_t lk_ics2_set_setpoint(uint8_t zone, int16_t setpoint_cdeg)
     ESP_LOGI(TAG, "Zone %d: writing setpoint %.1f°C (reg=0x%04X val=%d)",
              zone, setpoint_cdeg / 100.0f, reg_addr, lk_val);
 
-    return modbus_write_single(reg_addr, (uint16_t)lk_val);
+    esp_err_t err = modbus_write_single(reg_addr, (uint16_t)lk_val);
+    if (err != ESP_OK) return err;
+
+    // Write-through: update the cache so a subsequent failed poll does not
+    // re-publish the old setpoint back to Matter/Home Assistant.
+    xSemaphoreTake(s_zone_mutex, portMAX_DELAY);
+    s_zones[zone].setpoint_cdeg = setpoint_cdeg;
+    xSemaphoreGive(s_zone_mutex);
+    return ESP_OK;
 }
 
 esp_err_t lk_ics2_set_zone_mode(uint8_t zone, lk_zone_mode_t mode)
@@ -461,7 +481,16 @@ esp_err_t lk_ics2_set_zone_mode(uint8_t zone, lk_zone_mode_t mode)
 
     uint16_t reg_addr = LK_REG_ZONE_MODE_BASE + zone;
     ESP_LOGI(TAG, "Zone %d: writing mode %d (reg=0x%04X)", zone, mode, reg_addr);
-    return modbus_write_single(reg_addr, (uint16_t)mode);
+
+    esp_err_t err = modbus_write_single(reg_addr, (uint16_t)mode);
+    if (err != ESP_OK) return err;
+
+    // Write-through: update the cache so a subsequent failed poll does not
+    // re-publish the old mode back to Matter/Home Assistant.
+    xSemaphoreTake(s_zone_mutex, portMAX_DELAY);
+    s_zones[zone].mode = mode;
+    xSemaphoreGive(s_zone_mutex);
+    return ESP_OK;
 }
 
 esp_err_t lk_ics2_set_global_mode(lk_zone_mode_t mode)

@@ -29,29 +29,24 @@ static uint8_t  s_num_zones = 0;
 // ---------------------------------------------------------------------------
 // Mode conversion: LK ICS 2 ↔ Matter Thermostat SystemMode
 //
-// Matter SystemMode: 0=Off, 1=Auto, 3=Cool, 4=Heat
-// LK ICS 2 mode:    0=Off, 1=Heat, 2=Cool, 3=Auto
+// This is a heating-only device. Supported modes:
+//   Matter SystemMode: 0=Off, 4=Heat
+//   LK ICS 2 mode:     0=Off, 1=Heat
 // ---------------------------------------------------------------------------
 
 static uint8_t lk_mode_to_matter(lk_zone_mode_t lk_mode)
 {
     switch (lk_mode) {
-    case LK_ZONE_MODE_OFF:  return 0;
     case LK_ZONE_MODE_HEAT: return 4;
-    case LK_ZONE_MODE_COOL: return 3;
-    case LK_ZONE_MODE_AUTO: return 1;
-    default:                return 0;
+    default:                return 0;  // Off for any non-Heat LK state
     }
 }
 
 static lk_zone_mode_t matter_mode_to_lk(uint8_t matter_mode)
 {
     switch (matter_mode) {
-    case 0:  return LK_ZONE_MODE_OFF;
-    case 1:  return LK_ZONE_MODE_AUTO;
-    case 3:  return LK_ZONE_MODE_COOL;
     case 4:  return LK_ZONE_MODE_HEAT;
-    default: return LK_ZONE_MODE_AUTO;
+    default: return LK_ZONE_MODE_OFF;
     }
 }
 
@@ -88,10 +83,11 @@ static esp_err_t attribute_update_cb(attribute::callback_type_t type,
             }
         } else if (attribute_id == Thermostat::Attributes::SystemMode::Id) {
             uint8_t m = val->val.u8;
-            // Reject modes we cannot map to ICS 2 rather than silently changing behaviour.
-            // Valid Matter→LK mappings: 0=Off, 1=Auto, 3=Cool, 4=Heat.
-            if (m != 0 && m != 1 && m != 3 && m != 4) {
-                ESP_LOGW(TAG, "Zone %d: unsupported SystemMode %d rejected", zone, m);
+            // This is a heating-only endpoint; only Off (0) and Heat (4) are valid.
+            // Reject Cool (3), Auto (1), and any other value end-to-end so the
+            // endpoint model, write path, and LK ICS 2 remain consistent.
+            if (m != 0 && m != 4) {
+                ESP_LOGW(TAG, "Zone %d: SystemMode %d rejected (heating-only device)", zone, m);
                 return ESP_ERR_NOT_SUPPORTED;
             }
             lk_zone_mode_t lk_mode = matter_mode_to_lk(m);
