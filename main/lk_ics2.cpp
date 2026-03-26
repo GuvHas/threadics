@@ -283,57 +283,73 @@ static void poll_all_zones(void)
     uint8_t n = s_cfg.num_zones;
     uint16_t raw[LK_ICS2_MAX_ZONES];
 
-    // Start from existing cached data so partial batch failures retain the
-    // last known-good value for each field rather than reverting to zero.
-    lk_ics2_zone_t updated[LK_ICS2_MAX_ZONES];
-    xSemaphoreTake(s_zone_mutex, portMAX_DELAY);
-    for (uint8_t z = 0; z < n; z++) updated[z] = s_zones[z];
-    xSemaphoreGive(s_zone_mutex);
-
     // Room temperature is mandatory. If this batch fails, skip the whole
-    // cycle so no partial commit occurs.
+    // cycle to avoid any partial commit.
     if (modbus_read_input(LK_REG_ROOM_TEMP_BASE, n, raw) != ESP_OK) {
         ESP_LOGW(TAG, "Batch room temp read failed; retaining cached data for all zones");
         return;
     }
-    for (uint8_t z = 0; z < n; z++)
-        updated[z].room_temp_cdeg = lk_temp_to_cdeg((int16_t)raw[z]);
 
-    // Optional batches: keep previous value for a field if the read fails.
-    if (modbus_read_input(LK_REG_FLOOR_TEMP_BASE, n, raw) == ESP_OK)
-        for (uint8_t z = 0; z < n; z++)
-            updated[z].floor_temp_cdeg = lk_temp_to_cdeg((int16_t)raw[z]);
-
-    if (modbus_read_input(LK_REG_ACTUATOR_BASE, n, raw) == ESP_OK)
-        for (uint8_t z = 0; z < n; z++)
-            updated[z].actuator_pct = (uint8_t)(raw[z] & 0xFF);
-
-    if (modbus_read_holding(LK_REG_SETPOINT_BASE, n, raw) == ESP_OK)
-        for (uint8_t z = 0; z < n; z++)
-            updated[z].setpoint_cdeg = lk_temp_to_cdeg((int16_t)raw[z]);
-
-    if (modbus_read_holding(LK_REG_ZONE_MODE_BASE, n, raw) == ESP_OK)
-        for (uint8_t z = 0; z < n; z++)
-            updated[z].mode = (lk_zone_mode_t)(raw[z] & 0x03);
-
-    // Commit all zones atomically, then fire callbacks outside the lock.
+    // Update s_zones[] directly, one field at a time, rather than buffering
+    // in a snapshot and committing the whole struct at the end.  The snapshot
+    // pattern creates a race: a write-through (lk_ics2_set_setpoint / _zone_mode)
+    // that lands between the initial snapshot and the final commit gets silently
+    // overwritten by the stale snapshot value, defeating write-through caching.
+    // Writing only freshly-read fields under the mutex prevents that race.
     xSemaphoreTake(s_zone_mutex, portMAX_DELAY);
     for (uint8_t z = 0; z < n; z++) {
-        updated[z].valid = true;
-        s_zones[z] = updated[z];
+        s_zones[z].room_temp_cdeg = lk_temp_to_cdeg((int16_t)raw[z]);
+        s_zones[z].valid = true;
     }
     xSemaphoreGive(s_zone_mutex);
 
+    // Optional batches: only update the specific field when the read succeeds;
+    // leave the previous value (including any write-through) intact on failure.
+    if (modbus_read_input(LK_REG_FLOOR_TEMP_BASE, n, raw) == ESP_OK) {
+        xSemaphoreTake(s_zone_mutex, portMAX_DELAY);
+        for (uint8_t z = 0; z < n; z++)
+            s_zones[z].floor_temp_cdeg = lk_temp_to_cdeg((int16_t)raw[z]);
+        xSemaphoreGive(s_zone_mutex);
+    }
+
+    if (modbus_read_input(LK_REG_ACTUATOR_BASE, n, raw) == ESP_OK) {
+        xSemaphoreTake(s_zone_mutex, portMAX_DELAY);
+        for (uint8_t z = 0; z < n; z++)
+            s_zones[z].actuator_pct = (uint8_t)(raw[z] & 0xFF);
+        xSemaphoreGive(s_zone_mutex);
+    }
+
+    if (modbus_read_holding(LK_REG_SETPOINT_BASE, n, raw) == ESP_OK) {
+        xSemaphoreTake(s_zone_mutex, portMAX_DELAY);
+        for (uint8_t z = 0; z < n; z++)
+            s_zones[z].setpoint_cdeg = lk_temp_to_cdeg((int16_t)raw[z]);
+        xSemaphoreGive(s_zone_mutex);
+    }
+
+    if (modbus_read_holding(LK_REG_ZONE_MODE_BASE, n, raw) == ESP_OK) {
+        xSemaphoreTake(s_zone_mutex, portMAX_DELAY);
+        for (uint8_t z = 0; z < n; z++)
+            s_zones[z].mode = (lk_zone_mode_t)(raw[z] & 0x03);
+        xSemaphoreGive(s_zone_mutex);
+    }
+
+    // Snapshot for callbacks taken after all writes so it reflects the
+    // freshest state, including any concurrent write-throughs.
     if (s_cfg.update_cb) {
+        lk_ics2_zone_t snapshot[LK_ICS2_MAX_ZONES];
+        xSemaphoreTake(s_zone_mutex, portMAX_DELAY);
+        for (uint8_t z = 0; z < n; z++) snapshot[z] = s_zones[z];
+        xSemaphoreGive(s_zone_mutex);
+
         for (uint8_t z = 0; z < n; z++) {
-            s_cfg.update_cb(z, &updated[z], s_cfg.update_cb_ctx);
+            s_cfg.update_cb(z, &snapshot[z], s_cfg.update_cb_ctx);
             ESP_LOGD(TAG, "Zone %d: room=%.1f°C floor=%.1f°C sp=%.1f°C act=%d%% mode=%d",
                      z,
-                     updated[z].room_temp_cdeg  / 100.0f,
-                     updated[z].floor_temp_cdeg / 100.0f,
-                     updated[z].setpoint_cdeg   / 100.0f,
-                     updated[z].actuator_pct,
-                     updated[z].mode);
+                     snapshot[z].room_temp_cdeg  / 100.0f,
+                     snapshot[z].floor_temp_cdeg / 100.0f,
+                     snapshot[z].setpoint_cdeg   / 100.0f,
+                     snapshot[z].actuator_pct,
+                     snapshot[z].mode);
         }
     }
 }
