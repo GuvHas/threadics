@@ -135,15 +135,15 @@ esp_err_t matter_device_init(uint8_t num_zones)
     }
 
     for (uint8_t z = 0; z < num_zones; z++) {
-        // esp-matter 1.4: setpoints live inside features.heating/cooling;
-        // min/max setpoint limits are no longer in the config struct.
+        // esp-matter 1.4: setpoints live inside features.heating/cooling.
+        // This is a heating-only device (underfloor heating); cooling fields
+        // and control_sequence_of_operation are set accordingly.
         thermostat::config_t therm_cfg{};
-        therm_cfg.thermostat.local_temperature                      = 2000;  // 20.00°C
-        therm_cfg.thermostat.features.heating.occupied_heating_setpoint = 2100; // 21.00°C
-        therm_cfg.thermostat.features.cooling.occupied_cooling_setpoint = 2600; // 26.00°C
-        therm_cfg.thermostat.system_mode                            =    4;  // Heat
-        therm_cfg.thermostat.control_sequence_of_operation          =    4;  // Heating and Cooling
-        therm_cfg.thermostat.feature_flags                          =    1;  // Bit0=Heating
+        therm_cfg.thermostat.local_temperature                          = 2000;  // 20.00°C
+        therm_cfg.thermostat.features.heating.occupied_heating_setpoint = 2100;  // 21.00°C
+        therm_cfg.thermostat.system_mode                                =    4;  // Heat
+        therm_cfg.thermostat.control_sequence_of_operation              =    2;  // Heating Only
+        therm_cfg.thermostat.feature_flags                              =    1;  // Bit0=Heating
 
         endpoint_t *ep = thermostat::create(node, &therm_cfg, ENDPOINT_FLAG_NONE, nullptr);
         if (!ep) {

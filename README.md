@@ -13,11 +13,12 @@ in **Home Assistant** (and any other Matter controller).
 ## Features
 
 - Up to **12 independent heating zones** exposed as Matter Thermostat devices
-- Reads **room temperature**, **floor temperature** and **actuator position** per zone
-- Writes **setpoint** and **mode** (Off / Heat / Cool / Auto) back to the ICS 2
-- Native **Matter 1.3** over **Thread** — no cloud, no custom integrations
-- OTA firmware update support
+- Reads **room temperature**, **floor temperature**, and **actuator position** per zone
+  (floor temp and actuator are polled from ICS 2 but not yet exposed through Matter)
+- Writes **setpoint** and **mode** (Off / Heat) back to the ICS 2
+- Native **Matter** over **Thread** — no cloud, no custom integrations
 - Commissioning via **BLE** (standard Matter QR code / PIN flow)
+- **OTA not supported** in this prototype build (no OTA partitions; see `partitions.csv`)
 
 ---
 
@@ -72,13 +73,8 @@ Default GPIO assignments (configurable via `menuconfig`):
    source export.sh
    ```
 
-2. **esp-matter** (Espressif's Matter SDK)
-   ```bash
-   git clone --recursive https://github.com/espressif/esp-matter.git ~/esp/esp-matter
-   cd ~/esp/esp-matter
-   ./install.sh
-   source ./export.sh
-   ```
+2. **esp-matter** — downloaded automatically by the ESP-IDF component manager
+   when you run `idf.py build`; no manual clone required.
 
 3. **Thread Border Router** — required for Matter over Thread connectivity.
    - Recommended: [Home Assistant Thread integration](https://www.home-assistant.io/integrations/thread/)
@@ -125,8 +121,10 @@ All options are available through `idf.py menuconfig` under
 | `LK_ICS2_MODBUS_SLAVE_ADDR` | 1 | ICS 2 Modbus slave address |
 | `LK_ICS2_NUM_ZONES` | 6 | Number of zones to expose (1–12) |
 | `LK_ICS2_POLL_INTERVAL_MS` | 5000 | How often to read the ICS 2 (ms) |
-| `MATTER_DISCRIMINATOR` | 0xF00 | 12-bit Matter discriminator |
-| `MATTER_PASSCODE` | 20202021 | Matter setup passcode |
+
+> The Matter discriminator and passcode are set by the SDK defaults
+> (discriminator `0xF00`, passcode `20202021` for test builds). Flash
+> factory NVS data to change them for production devices.
 
 ---
 
@@ -191,8 +189,12 @@ After commissioning, HA creates one **Climate entity** per zone:
 
 Each entity exposes:
 - Current temperature (room sensor)
-- Target temperature (setpoint)
-- HVAC mode (Off / Heat / Cool / Auto)
+- Target temperature (heating setpoint)
+- HVAC mode (Off / Heat)
+
+> Floor temperature and actuator position are polled from the ICS 2 but
+> are not yet exposed through Matter (no standard cluster for those values).
+> They are available in firmware logs at DEBUG level.
 
 ---
 
