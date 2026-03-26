@@ -81,11 +81,26 @@ static esp_err_t attribute_update_cb(attribute::callback_type_t type,
         if (attribute_id == Thermostat::Attributes::OccupiedHeatingSetpoint::Id) {
             int16_t sp = val->val.i16;
             ESP_LOGI(TAG, "Zone %d: HA→ICS2 setpoint %.2f°C", zone, sp / 100.0f);
-            lk_ics2_set_setpoint(zone, sp);
+            esp_err_t err = lk_ics2_set_setpoint(zone, sp);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Zone %d: setpoint Modbus write failed: %s", zone, esp_err_to_name(err));
+                return err;  // Reject the attribute update so HA stays in sync with the device
+            }
         } else if (attribute_id == Thermostat::Attributes::SystemMode::Id) {
             uint8_t m = val->val.u8;
-            ESP_LOGI(TAG, "Zone %d: HA→ICS2 mode %d→%d", zone, m, matter_mode_to_lk(m));
-            lk_ics2_set_zone_mode(zone, matter_mode_to_lk(m));
+            // Reject modes we cannot map to ICS 2 rather than silently changing behaviour.
+            // Valid Matter→LK mappings: 0=Off, 1=Auto, 3=Cool, 4=Heat.
+            if (m != 0 && m != 1 && m != 3 && m != 4) {
+                ESP_LOGW(TAG, "Zone %d: unsupported SystemMode %d rejected", zone, m);
+                return ESP_ERR_NOT_SUPPORTED;
+            }
+            lk_zone_mode_t lk_mode = matter_mode_to_lk(m);
+            ESP_LOGI(TAG, "Zone %d: HA→ICS2 mode %d→%d", zone, m, lk_mode);
+            esp_err_t err = lk_ics2_set_zone_mode(zone, lk_mode);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Zone %d: mode Modbus write failed: %s", zone, esp_err_to_name(err));
+                return err;
+            }
         }
     }
     return ESP_OK;
