@@ -6,6 +6,7 @@
 #include "freertos/semphr.h"
 #include "driver/uart.h"
 #include "driver/gpio.h"
+#include "esp_check.h"
 #include "esp_log.h"
 #include "esp_err.h"
 
