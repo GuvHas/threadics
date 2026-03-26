@@ -9,29 +9,21 @@ extern "C" {
 #endif
 
 /**
- * @brief  Initialize the Matter node.
+ * @brief  Create the Matter node and one Thermostat endpoint per heating zone.
  *
- * Creates the root endpoint (Basic Information, OTA, etc.) plus one
- * Thermostat endpoint per zone.  Must be called after lk_ics2_init().
+ * Registers the attribute write callback (setpoint / mode changes from a
+ * Matter controller are forwarded to the LK ICS 2 via Modbus).
+ * Must be called before esp_matter::start().
  *
- * @param  num_zones  Number of thermostat endpoints to create.
+ * @param  num_zones  Number of thermostat endpoints to create (1-12).
  * @return ESP_OK on success.
  */
 esp_err_t matter_device_init(uint8_t num_zones);
 
 /**
- * @brief  Start the Matter stack (commissioning + event loop).
+ * @brief  Push fresh LK ICS 2 data into the Matter attribute store.
  *
- * Call this after matter_device_init().  Blocks until the stack is running.
- * @return ESP_OK on success.
- */
-esp_err_t matter_device_start(void);
-
-/**
- * @brief  Update zone attributes from fresh LK ICS 2 data.
- *
- * Called from the lk_ics2 update callback to push new temperature /
- * mode data into the Matter attribute store so Home Assistant sees it.
+ * Must be called from the CHIP task context (e.g. via PlatformMgr().ScheduleWork()).
  *
  * @param  zone  Zone index (0-based).
  * @param  data  Latest zone data from the LK ICS 2 driver.

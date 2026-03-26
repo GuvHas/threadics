@@ -1,101 +1,70 @@
-# ESP32-C6 target
+# Target board and SoC
 CONFIG_IDF_TARGET="esp32c6"
 
-# FreeRTOS
+# OpenThread + Matter over Thread + BLE commissioning
+CONFIG_OPENTHREAD_ENABLED=y
+CONFIG_OPENTHREAD_FTD=y
+
+# Pin OpenThread router-role thresholds explicitly so behaviour is documented
+# and stable across SDK/OpenThread upgrades.
+CONFIG_OPENTHREAD_MAX_ROUTERS=32
+CONFIG_OPENTHREAD_ROUTER_UPGRADE_THRESHOLD=16
+CONFIG_OPENTHREAD_ROUTER_DOWNGRADE_THRESHOLD=23
+
+# Persist Thread network credentials across reboots.
+CONFIG_OPENTHREAD_NVS_PERSIST=y
+
+# BLE discovery for commissioning
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_ENABLE_CHIPOBLE=y
+
+# Route all Matter credentials to the protected nvs_matter partition.
+CONFIG_CHIP_FACTORY_NAMESPACE_PARTITION_LABEL="nvs_matter"
+CONFIG_CHIP_CONFIG_NAMESPACE_PARTITION_LABEL="nvs_matter"
+CONFIG_ESP_MATTER_NVS_PART_NAME="nvs_matter"
+
+# OTA disabled: no ota_0/ota_1 partitions in this partition table.
+CONFIG_ENABLE_OTA_REQUESTOR=n
+
+# Disable CHIP's WiFi NetworkCommissioning driver and WiFi station so that
+# only the Thread NetworkCommissioning cluster is advertised to commissioners.
+#
+# Without these, esp_matter::start() registers both WiFi and Thread clusters
+# and Home Assistant may attempt WiFi commissioning even with a Thread Border
+# Router available. Also prevents ConnectivityManagerImpl from requiring
+# WiFi-specific methods it does not implement in Thread-only builds.
+CONFIG_WIFI_NETWORK_COMMISSIONING_DRIVER=n
+CONFIG_ENABLE_WIFI_STATION=n
+
+# FreeRTOS tick rate: 1000 Hz gives 1 ms resolution for MRP retransmission
+# timers, Thread MLE timeouts, and Matter subscription reporting intervals.
 CONFIG_FREERTOS_HZ=1000
-CONFIG_FREERTOS_UNICORE=n
 
-# System
-CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+# Matter device identity shown in Home Assistant and other controllers.
+CONFIG_DEVICE_PRODUCT_NAME="LK ICS2 Matter Bridge"
 
-# Flash
-CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+# Matter + logging defaults
+CONFIG_ESP_MATTER_ENABLE_DATA_MODEL=y
+CONFIG_LOG_DEFAULT_LEVEL=2
+CONFIG_OPENTHREAD_LOG_LEVEL_NOTE=y
+
+# mbedTLS features required by esp_matter/CHIP
+CONFIG_MBEDTLS_HKDF_C=y
+
+# Custom partition table
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
-# NVS encryption (recommended for Matter DAC storage)
-CONFIG_NVS_ENCRYPTION=n
+# Flash size (required by custom partition table)
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 
-# Thread / OpenThread
-# Only enable what a Matter over Thread END DEVICE actually needs.
-# Matter delivers Thread credentials over BLE during commissioning, so the
-# device never acts as a Thread Commissioner or Joiner.  Enabling those
-# features pulls in secure_transport.cpp which calls mbedTLS 2.x-only DTLS /
-# ECJPAKE APIs (mbedtls_ssl_conf_handshake_timeout,
-# mbedtls_ssl_conf_dtls_cookies, mbedtls_ssl_set_hs_ecjpake_password …)
-# that were removed in mbedTLS 3.x — causing build failures.
-CONFIG_OPENTHREAD_ENABLED=y
-CONFIG_OPENTHREAD_FTD=y
-CONFIG_OPENTHREAD_DNS64_CLIENT=y
-CONFIG_OPENTHREAD_DNS_CLIENT=y
-CONFIG_OPENTHREAD_SRP_CLIENT=y
-CONFIG_OPENTHREAD_COMMISSIONER=n
-CONFIG_OPENTHREAD_JOINER=n
-CONFIG_OPENTHREAD_COAP=n
-CONFIG_OPENTHREAD_COAP_SECURE=n
-CONFIG_OPENTHREAD_BORDER_AGENT=n
-CONFIG_OPENTHREAD_BORDER_ROUTER=n
+# Coredump to flash (ELF format for gdb)
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 
-# IEEE 802.15.4 (Thread radio on ESP32-C6)
-CONFIG_IEEE802154_ENABLED=y
-
-# Matter
-# Enable Matter over Thread transport (maps to CHIP_DEVICE_CONFIG_ENABLE_THREAD).
-# Defined here via Kconfig so CHIPProjectConfig.h does not redefine the same
-# macro with a different token string, which GCC -Werror treats as an error.
-# WiFi must be explicitly disabled: when both Thread and WiFi are present the
-# ConnectivityManagerImpl for Thread-only devices does not implement WiFi-specific
-# methods (GetAndLogWiFiStatsCounters, etc.) causing incomplete-type errors.
-CONFIG_ENABLE_MATTER_OVER_THREAD=y
-# Disable WiFi station in the Matter SDK. This is a Thread-only device;
-# without this, CHIP_DEVICE_CONFIG_ENABLE_WIFI_STATION defaults to 1,
-# causing ConnectivityManagerImpl (Thread-only) to be required to implement
-# WiFi-specific methods it does not have (GetAndLogWiFiStatsCounters, etc.).
-CONFIG_ENABLE_WIFI_STATION=n
-CONFIG_ESP_MATTER_ENABLE_DATA_MODEL=y
-CONFIG_CHIP_DEVICE_VENDOR_ID=0xFFF1
-CONFIG_CHIP_DEVICE_PRODUCT_ID=0x8001
-CONFIG_CHIP_DEVICE_TYPE=0x0301
-CONFIG_CHIP_DEVICE_HARDWARE_VERSION=1
-CONFIG_CHIP_DEVICE_HARDWARE_VERSION_STRING="1.0"
-CONFIG_CHIP_DEVICE_SOFTWARE_VERSION=1
-CONFIG_CHIP_DEVICE_SOFTWARE_VERSION_STRING="1.0.0"
-CONFIG_CHIP_DEVICE_PRODUCT_NAME="LK ICS2 Matter Bridge"
-CONFIG_CHIP_DEVICE_VENDOR_NAME="threadics"
-CONFIG_CHIP_DEVICE_SERIAL_NUMBER="TEST0001"
-
-# Matter commissioning
-CONFIG_CHIP_ENABLE_PAIRING_AUTOSTART=y
-
-# CHIP project config
-CONFIG_CHIP_PROJECT_CONFIG="main/CHIPProjectConfig.h"
-
-# Logging
-CONFIG_LOG_DEFAULT_LEVEL_INFO=y
-CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
-
-# UART for RS485
-CONFIG_UART_ISR_IN_IRAM=y
-
-# Main task stack size (Matter needs a large stack)
+# Main task stack: Matter/Thread init path needs >3584 byte default
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
-# Heap
-CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
-
-# BLE for Matter commissioning (BLE is used for initial pairing)
-CONFIG_BT_ENABLED=y
-CONFIG_BT_NIMBLE_ENABLED=y
-CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
-CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
-CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
-
-# MDNS
-CONFIG_MDNS_MAX_SERVICES=10
-
-# TCP/IP stack
-CONFIG_LWIP_IPV6=y
-CONFIG_LWIP_IPV6_NUM_ADDRESSES=6
-
-# Watchdog
-CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+# UART ISR in IRAM for reliable RS485 timing under cache pressure
+CONFIG_UART_ISR_IN_IRAM=y

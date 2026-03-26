@@ -1,4 +1,4 @@
-name: Build
+name: Build ESP Firmware (ESP-IDF)
 
 on:
   push:
@@ -8,39 +8,36 @@ on:
 
 jobs:
   build:
-    name: Compile firmware (ESP32-C6)
     runs-on: ubuntu-latest
-
-    # Use Espressif's pre-built image that ships both ESP-IDF and the
-    # esp-matter SDK ready to use — no manual SDK installation needed.
-    container:
-      # release-v1.5 (IDF 5.4.1) — released 2026-03-25.
-      # release-v1.3 has a stale Python env (cryptography>=44 vs <42 constraint).
-      # release-v1.4/latest has an ESP Matter/connectedhomeip API mismatch
-      # (EncodableToTLV header not resolved, breaking esp_matter_client.cpp).
-      # release-v1.5 ships consistent components and a current Python env.
-      image: espressif/esp-matter:release-v1.5_idf_v5.4.1
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Cache managed components
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
         with:
-          submodules: false
+          path: |
+            managed_components
+            dependencies.lock
+          key: ${{ runner.os }}-components-${{ hashFiles('main/idf_component.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-components-
 
-      - name: Fix git safe.directory
-        # GitHub Actions checks out code owned by a different UID than the
-        # container user, causing git to refuse rev-parse during the build.
-        run: git config --global --add safe.directory '*'
+      - name: Build with ESP-IDF
+        uses: espressif/esp-idf-ci-action@e6f5c74232b1ccd4c97ed641f1e48553853f1fd5 # v1.2.0
+        with:
+          esp_idf_version: v5.5.3
+          target: esp32c6
+          path: .
 
-      - name: Build firmware
-        shell: bash
-        run: |
-          # Source ESP-IDF and esp-matter environment
-          . "$IDF_PATH/export.sh"
-          . "$ESP_MATTER_PATH/export.sh"
-
-          # Set ESP32-C6 as the build target
-          idf.py set-target esp32c6
-
-          # Full build — exits non-zero on any error, failing the job
-          idf.py build
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: esp-idf-firmware
+          path: |
+            build/bootloader/bootloader.bin
+            build/partition_table/partition-table.bin
+            build/*.bin

@@ -1,8 +1,15 @@
-# Name,   Type, SubType, Offset,  Size, Flags
-nvs,      data, nvs,     0x9000,  0x6000,
-otadata,  data, ota,     0xf000,  0x2000,
-phy_init, data, phy,     0x11000, 0x1000,
-ota_0,    app,  ota_0,   0x20000, 0x1C0000,
-ota_1,    app,  ota_1,   0x1E0000,0x1C0000,
-nvs_keys, data, nvs_keys,0x3A0000,0x1000,
-fctry,    data, nvs,     0x3A1000,0x6000,
+# Name,      Type, SubType,  Offset,   Size,   Flags
+# Two NVS partitions to isolate Matter credentials from general app state:
+#   nvs        — general app state; safe to auto-erase on corruption.
+#   nvs_matter — all Matter credentials: factory data (discriminator, PAKE verifier,
+#                attestation material), fabric table (Root CA, NOC, operational keys),
+#                ACL entries, and group keys. Never auto-erased.
+#
+# nvs_keys: reserved for NVS encryption key storage (4 KB).
+# OTA intentionally unsupported in this prototype build.
+nvs,        data, nvs,      0x9000,   0x6000,
+nvs_matter, data, nvs,      0xF000,   0x6000,
+phy_init,   data, phy,      0x15000,  0x1000,
+nvs_keys,   data, nvs_keys, 0x16000,  0x1000,
+factory,    app,  factory,  0x20000,  0x300000,
+coredump,   data, coredump, 0x320000, 0x20000,
