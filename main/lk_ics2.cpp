@@ -74,6 +74,11 @@ static void uart_flush_rx(void)
 static esp_err_t modbus_transaction(const uint8_t *req, size_t req_len,
                                      uint8_t *rsp, size_t rsp_max, size_t *rsp_len)
 {
+    // Guard against calls before lk_ics2_init() has created the mutex.
+    if (!s_bus_mutex) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
     // Serialise all bus access. The poll task and the Matter attribute write
     // callback both call this function from different RTOS tasks; without this
     // lock a poll read and a setpoint write can overlap, causing CRC failures,
