@@ -67,19 +67,4 @@ menu "LK ICS2 Matter Bridge Configuration"
         help
             Timeout waiting for a Modbus RTU response from the LK ICS 2.
 
-    config MATTER_DISCRIMINATOR
-        hex "Matter Discriminator"
-        default 0xF00
-        range 0x000 0xFFF
-        help
-            12-bit Matter discriminator used during BLE commissioning.
-            Change this to a unique value per device.
-
-    config MATTER_PASSCODE
-        int "Matter Setup Passcode"
-        default 20202021
-        help
-            Matter setup passcode for commissioning. Must be a valid
-            Matter passcode (not 00000000, 11111111, etc.).
-
 endmenu

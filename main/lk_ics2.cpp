@@ -18,7 +18,8 @@ static const char *TAG = "lk_ics2";
 
 static lk_ics2_config_t  s_cfg;
 static lk_ics2_zone_t    s_zones[LK_ICS2_MAX_ZONES];
-static SemaphoreHandle_t s_mutex;          // protects s_zones[]
+static SemaphoreHandle_t s_zone_mutex;     // protects s_zones[] cache
+static SemaphoreHandle_t s_bus_mutex;      // serialises all RS485/Modbus transactions
 static TaskHandle_t      s_poll_task;
 
 // ============================================================
@@ -73,8 +74,24 @@ static void uart_flush_rx(void)
 static esp_err_t modbus_transaction(const uint8_t *req, size_t req_len,
                                      uint8_t *rsp, size_t rsp_max, size_t *rsp_len)
 {
-    // Build frame with CRC
-    uint8_t frame[req_len + 2];
+    // Guard against calls before lk_ics2_init() has created the mutex.
+    if (!s_bus_mutex) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // Serialise all bus access. The poll task and the Matter attribute write
+    // callback both call this function from different RTOS tasks; without this
+    // lock a poll read and a setpoint write can overlap, causing CRC failures,
+    // half-duplex direction glitches, or mixed frames on the RS485 bus.
+    xSemaphoreTake(s_bus_mutex, portMAX_DELAY);
+
+    // All Modbus requests are 6 bytes; +2 for CRC = 8 bytes max.
+    // Fixed-size avoids the VLA extension (not standard C++).
+    uint8_t frame[8];
+    if (req_len + 2u > sizeof(frame)) {
+        xSemaphoreGive(s_bus_mutex);
+        return ESP_ERR_INVALID_SIZE;
+    }
     memcpy(frame, req, req_len);
     uint16_t crc = modbus_crc16(req, req_len);
     frame[req_len]     = (uint8_t)(crc & 0xFF);
@@ -92,46 +109,53 @@ static esp_err_t modbus_transaction(const uint8_t *req, size_t req_len,
     uart_wait_tx_done(port, pdMS_TO_TICKS(100));
     rs485_rx_enable();
 
+    esp_err_t ret = ESP_OK;
+
     if (written != (int)sizeof(frame)) {
         ESP_LOGE(TAG, "UART write failed (%d of %zu bytes)", written, sizeof(frame));
-        return ESP_FAIL;
+        ret = ESP_FAIL;
+        goto done;
     }
 
-    // Read response
-    int received = uart_read_bytes(port, rsp, rsp_max,
-                                   pdMS_TO_TICKS(s_cfg.response_timeout_ms));
-    if (received <= 0) {
-        ESP_LOGW(TAG, "Modbus timeout - no response from slave %d", s_cfg.slave_addr);
-        return ESP_ERR_TIMEOUT;
+    {
+        // Read response
+        int received = uart_read_bytes(port, rsp, rsp_max,
+                                       pdMS_TO_TICKS(s_cfg.response_timeout_ms));
+        if (received <= 0) {
+            ESP_LOGW(TAG, "Modbus timeout - no response from slave %d", s_cfg.slave_addr);
+            ret = ESP_ERR_TIMEOUT;
+            goto done;
+        }
+
+        *rsp_len = (size_t)received;
+
+        if (*rsp_len < 4) {
+            ESP_LOGE(TAG, "Response too short (%zu bytes)", *rsp_len);
+            ret = ESP_ERR_INVALID_RESPONSE;
+            goto done;
+        }
+        uint16_t resp_crc = modbus_crc16(rsp, *rsp_len - 2);
+        uint16_t rcv_crc  = (uint16_t)(rsp[*rsp_len - 2]) | ((uint16_t)(rsp[*rsp_len - 1]) << 8);
+        if (resp_crc != rcv_crc) {
+            ESP_LOGE(TAG, "CRC mismatch (calc=0x%04X, rcvd=0x%04X)", resp_crc, rcv_crc);
+            ret = ESP_ERR_INVALID_CRC;
+            goto done;
+        }
+        if (rsp[0] != s_cfg.slave_addr) {
+            ESP_LOGE(TAG, "Slave addr mismatch (exp=%d, got=%d)", s_cfg.slave_addr, rsp[0]);
+            ret = ESP_FAIL;
+            goto done;
+        }
+        if (rsp[1] & 0x80) {
+            ESP_LOGE(TAG, "Modbus exception: code=0x%02X", rsp[2]);
+            ret = ESP_ERR_INVALID_RESPONSE;
+            goto done;
+        }
     }
 
-    *rsp_len = (size_t)received;
-
-    // Validate CRC on response
-    if (*rsp_len < 4) {
-        ESP_LOGE(TAG, "Response too short (%zu bytes)", *rsp_len);
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-    uint16_t resp_crc = modbus_crc16(rsp, *rsp_len - 2);
-    uint16_t rcv_crc  = (uint16_t)(rsp[*rsp_len - 2]) | ((uint16_t)(rsp[*rsp_len - 1]) << 8);
-    if (resp_crc != rcv_crc) {
-        ESP_LOGE(TAG, "CRC mismatch (calc=0x%04X, rcvd=0x%04X)", resp_crc, rcv_crc);
-        return ESP_ERR_INVALID_CRC;
-    }
-
-    // Check slave address matches
-    if (rsp[0] != s_cfg.slave_addr) {
-        ESP_LOGE(TAG, "Slave addr mismatch (exp=%d, got=%d)", s_cfg.slave_addr, rsp[0]);
-        return ESP_FAIL;
-    }
-
-    // Check for exception response (FC | 0x80)
-    if (rsp[1] & 0x80) {
-        ESP_LOGE(TAG, "Modbus exception: code=0x%02X", rsp[2]);
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-
-    return ESP_OK;
+done:
+    xSemaphoreGive(s_bus_mutex);
+    return ret;
 }
 
 /**
@@ -152,7 +176,9 @@ static esp_err_t modbus_read_holding(uint16_t start_addr, uint16_t count, uint16
         (uint8_t)(count & 0xFF),
     };
 
-    uint8_t rsp[5 + count * 2];
+    if (count > LK_ICS2_MAX_ZONES) return ESP_ERR_INVALID_SIZE;
+    // 3-byte header + count×2 data + 2-byte CRC; fixed-size avoids VLA.
+    uint8_t rsp[3 + LK_ICS2_MAX_ZONES * 2 + 2];
     size_t  rsp_len = 0;
     esp_err_t ret = modbus_transaction(req, sizeof(req), rsp, sizeof(rsp), &rsp_len);
     if (ret != ESP_OK) return ret;
@@ -183,7 +209,8 @@ static esp_err_t modbus_read_input(uint16_t start_addr, uint16_t count, uint16_t
         (uint8_t)(count & 0xFF),
     };
 
-    uint8_t rsp[5 + count * 2];
+    if (count > LK_ICS2_MAX_ZONES) return ESP_ERR_INVALID_SIZE;
+    uint8_t rsp[3 + LK_ICS2_MAX_ZONES * 2 + 2];
     size_t  rsp_len = 0;
     esp_err_t ret = modbus_transaction(req, sizeof(req), rsp, sizeof(rsp), &rsp_len);
     if (ret != ESP_OK) return ret;
@@ -235,60 +262,68 @@ static inline int16_t cdeg_to_lk_temp(int16_t cdeg)
     return (int16_t)(cdeg / 10);     // x0.01°C → x0.1°C
 }
 
-static void poll_zone(uint8_t zone)
+// Read all zones in 5 batched Modbus transactions (one per register block)
+// instead of 5 transactions per zone. For N zones this cuts bus traffic from
+// 5N to 5 requests per poll cycle, reducing contention with write operations
+// and improving latency for all zones.
+static void poll_all_zones(void)
 {
-    uint16_t raw[1];
+    uint8_t n = s_cfg.num_zones;
+    uint16_t raw[LK_ICS2_MAX_ZONES];
 
-    lk_ics2_zone_t updated;
-    memset(&updated, 0, sizeof(updated));
+    // Start from existing cached data so partial batch failures retain the
+    // last known-good value for each field rather than reverting to zero.
+    lk_ics2_zone_t updated[LK_ICS2_MAX_ZONES];
+    xSemaphoreTake(s_zone_mutex, portMAX_DELAY);
+    for (uint8_t z = 0; z < n; z++) updated[z] = s_zones[z];
+    xSemaphoreGive(s_zone_mutex);
 
-    // Read room temperature (input register)
-    if (modbus_read_input(LK_REG_ROOM_TEMP_BASE + zone, 1, raw) == ESP_OK) {
-        updated.room_temp_cdeg = lk_temp_to_cdeg((int16_t)raw[0]);
-    } else {
-        ESP_LOGW(TAG, "Zone %d: failed to read room temperature", zone);
-        return;  // Skip this zone if comms failed
+    // Room temperature is mandatory. If this batch fails, skip the whole
+    // cycle so no partial commit occurs.
+    if (modbus_read_input(LK_REG_ROOM_TEMP_BASE, n, raw) != ESP_OK) {
+        ESP_LOGW(TAG, "Batch room temp read failed; retaining cached data for all zones");
+        return;
     }
+    for (uint8_t z = 0; z < n; z++)
+        updated[z].room_temp_cdeg = lk_temp_to_cdeg((int16_t)raw[z]);
 
-    // Read floor temperature (input register)
-    if (modbus_read_input(LK_REG_FLOOR_TEMP_BASE + zone, 1, raw) == ESP_OK) {
-        updated.floor_temp_cdeg = lk_temp_to_cdeg((int16_t)raw[0]);
+    // Optional batches: keep previous value for a field if the read fails.
+    if (modbus_read_input(LK_REG_FLOOR_TEMP_BASE, n, raw) == ESP_OK)
+        for (uint8_t z = 0; z < n; z++)
+            updated[z].floor_temp_cdeg = lk_temp_to_cdeg((int16_t)raw[z]);
+
+    if (modbus_read_input(LK_REG_ACTUATOR_BASE, n, raw) == ESP_OK)
+        for (uint8_t z = 0; z < n; z++)
+            updated[z].actuator_pct = (uint8_t)(raw[z] & 0xFF);
+
+    if (modbus_read_holding(LK_REG_SETPOINT_BASE, n, raw) == ESP_OK)
+        for (uint8_t z = 0; z < n; z++)
+            updated[z].setpoint_cdeg = lk_temp_to_cdeg((int16_t)raw[z]);
+
+    if (modbus_read_holding(LK_REG_ZONE_MODE_BASE, n, raw) == ESP_OK)
+        for (uint8_t z = 0; z < n; z++)
+            updated[z].mode = (lk_zone_mode_t)(raw[z] & 0x03);
+
+    // Commit all zones atomically, then fire callbacks outside the lock.
+    xSemaphoreTake(s_zone_mutex, portMAX_DELAY);
+    for (uint8_t z = 0; z < n; z++) {
+        updated[z].valid = true;
+        s_zones[z] = updated[z];
     }
+    xSemaphoreGive(s_zone_mutex);
 
-    // Read actuator position (input register)
-    if (modbus_read_input(LK_REG_ACTUATOR_BASE + zone, 1, raw) == ESP_OK) {
-        updated.actuator_pct = (uint8_t)(raw[0] & 0xFF);
-    }
-
-    // Read setpoint (holding register)
-    if (modbus_read_holding(LK_REG_SETPOINT_BASE + zone, 1, raw) == ESP_OK) {
-        updated.setpoint_cdeg = lk_temp_to_cdeg((int16_t)raw[0]);
-    }
-
-    // Read zone mode (holding register)
-    if (modbus_read_holding(LK_REG_ZONE_MODE_BASE + zone, 1, raw) == ESP_OK) {
-        updated.mode = (lk_zone_mode_t)(raw[0] & 0x03);
-    }
-
-    updated.valid = true;
-
-    // Update shared zone data under mutex
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
-    s_zones[zone] = updated;
-    xSemaphoreGive(s_mutex);
-
-    // Notify caller
     if (s_cfg.update_cb) {
-        s_cfg.update_cb(zone, &updated, s_cfg.update_cb_ctx);
+        for (uint8_t z = 0; z < n; z++) {
+            s_cfg.update_cb(z, &updated[z], s_cfg.update_cb_ctx);
+            ESP_LOGD(TAG, "Zone %d: room=%.1f°C floor=%.1f°C sp=%.1f°C act=%d%% mode=%d",
+                     z,
+                     updated[z].room_temp_cdeg  / 100.0f,
+                     updated[z].floor_temp_cdeg / 100.0f,
+                     updated[z].setpoint_cdeg   / 100.0f,
+                     updated[z].actuator_pct,
+                     updated[z].mode);
+        }
     }
-
-    ESP_LOGD(TAG, "Zone %d: room=%.1f°C floor=%.1f°C setpoint=%.1f°C actuator=%d%% mode=%d",
-             zone,
-             updated.room_temp_cdeg  / 100.0f,
-             updated.floor_temp_cdeg / 100.0f,
-             updated.setpoint_cdeg   / 100.0f,
-             updated.actuator_pct,
-             updated.mode);
 }
 
 static void poll_task(void *arg)
@@ -297,11 +332,7 @@ static void poll_task(void *arg)
              s_cfg.num_zones, (int)s_cfg.poll_interval_ms);
 
     while (true) {
-        for (uint8_t z = 0; z < s_cfg.num_zones; z++) {
-            poll_zone(z);
-            // Small inter-zone delay to avoid bus congestion
-            vTaskDelay(pdMS_TO_TICKS(50));
-        }
+        poll_all_zones();
         vTaskDelay(pdMS_TO_TICKS(s_cfg.poll_interval_ms));
     }
 }
@@ -369,8 +400,9 @@ esp_err_t lk_ics2_init(const lk_ics2_config_t *cfg)
     memcpy(&s_cfg, cfg, sizeof(s_cfg));
     memset(s_zones, 0, sizeof(s_zones));
 
-    s_mutex = xSemaphoreCreateMutex();
-    if (!s_mutex) {
+    s_zone_mutex = xSemaphoreCreateMutex();
+    s_bus_mutex  = xSemaphoreCreateMutex();
+    if (!s_zone_mutex || !s_bus_mutex) {
         return ESP_ERR_NO_MEM;
     }
 
@@ -395,9 +427,9 @@ esp_err_t lk_ics2_get_zone(uint8_t zone, lk_ics2_zone_t *out)
         return ESP_ERR_INVALID_ARG;
     }
 
-    xSemaphoreTake(s_mutex, portMAX_DELAY);
+    xSemaphoreTake(s_zone_mutex, portMAX_DELAY);
     *out = s_zones[zone];
-    xSemaphoreGive(s_mutex);
+    xSemaphoreGive(s_zone_mutex);
 
     return out->valid ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
