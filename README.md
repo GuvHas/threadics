@@ -121,6 +121,7 @@ All options are available through `idf.py menuconfig` under
 | `LK_ICS2_MODBUS_SLAVE_ADDR` | 1 | ICS 2 Modbus slave address |
 | `LK_ICS2_NUM_ZONES` | 6 | Number of zones to expose (1–12) |
 | `LK_ICS2_POLL_INTERVAL_MS` | 5000 | How often to read the ICS 2 (ms) |
+| `LK_ICS2_MODBUS_TIMEOUT_MS` | 200 | Modbus response timeout (ms) |
 
 > The Matter discriminator and passcode are set by the SDK defaults
 > (discriminator `0xF00`, passcode `20202021` for test builds). Flash
