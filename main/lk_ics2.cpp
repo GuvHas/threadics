@@ -183,6 +183,16 @@ static esp_err_t modbus_read_holding(uint16_t start_addr, uint16_t count, uint16
     esp_err_t ret = modbus_transaction(req, sizeof(req), rsp, sizeof(rsp), &rsp_len);
     if (ret != ESP_OK) return ret;
 
+    // Validate function code and exact frame length before reading data bytes.
+    // Byte count alone is not sufficient: a response with the right payload size
+    // but the wrong function code (possible on a noisy bus) would pass silently.
+    size_t expected_len = 3u + (size_t)count * 2u + 2u; // hdr(3) + data + CRC(2)
+    if (rsp_len != expected_len || rsp[1] != 0x03) {
+        ESP_LOGE(TAG, "FC03 response invalid (len=%u exp=%u fc=0x%02X)",
+                 (unsigned)rsp_len, (unsigned)expected_len, rsp[1]);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
     uint8_t byte_count = rsp[2];
     if (byte_count != count * 2) {
         ESP_LOGE(TAG, "FC03 byte count mismatch (exp=%d, got=%d)", count * 2, byte_count);
@@ -214,6 +224,13 @@ static esp_err_t modbus_read_input(uint16_t start_addr, uint16_t count, uint16_t
     size_t  rsp_len = 0;
     esp_err_t ret = modbus_transaction(req, sizeof(req), rsp, sizeof(rsp), &rsp_len);
     if (ret != ESP_OK) return ret;
+
+    size_t expected_len = 3u + (size_t)count * 2u + 2u;
+    if (rsp_len != expected_len || rsp[1] != 0x04) {
+        ESP_LOGE(TAG, "FC04 response invalid (len=%u exp=%u fc=0x%02X)",
+                 (unsigned)rsp_len, (unsigned)expected_len, rsp[1]);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
 
     uint8_t byte_count = rsp[2];
     if (byte_count != count * 2) {
@@ -290,6 +307,13 @@ static void poll_all_zones(void)
         return;
     }
 
+    // Snapshot the current state before any field writes so we can detect
+    // which zones actually changed and avoid pushing unchanged zones into Matter.
+    lk_ics2_zone_t before[LK_ICS2_MAX_ZONES];
+    xSemaphoreTake(s_zone_mutex, portMAX_DELAY);
+    for (uint8_t z = 0; z < n; z++) before[z] = s_zones[z];
+    xSemaphoreGive(s_zone_mutex);
+
     // Update s_zones[] directly, one field at a time, rather than buffering
     // in a snapshot and committing the whole struct at the end.  The snapshot
     // pattern creates a race: a write-through (lk_ics2_set_setpoint / _zone_mode)
@@ -336,20 +360,29 @@ static void poll_all_zones(void)
     // Snapshot for callbacks taken after all writes so it reflects the
     // freshest state, including any concurrent write-throughs.
     if (s_cfg.update_cb) {
-        lk_ics2_zone_t snapshot[LK_ICS2_MAX_ZONES];
+        lk_ics2_zone_t after[LK_ICS2_MAX_ZONES];
         xSemaphoreTake(s_zone_mutex, portMAX_DELAY);
-        for (uint8_t z = 0; z < n; z++) snapshot[z] = s_zones[z];
+        for (uint8_t z = 0; z < n; z++) after[z] = s_zones[z];
         xSemaphoreGive(s_zone_mutex);
 
         for (uint8_t z = 0; z < n; z++) {
-            s_cfg.update_cb(z, &snapshot[z], s_cfg.update_cb_ctx);
+            // Only push zones whose Matter-visible fields changed.  This avoids
+            // per-cycle heap allocation, CHIP task scheduling, and attribute
+            // writes for zones that are in steady state.
+            bool changed = !before[z].valid                             ||
+                           before[z].room_temp_cdeg != after[z].room_temp_cdeg ||
+                           before[z].setpoint_cdeg  != after[z].setpoint_cdeg  ||
+                           before[z].mode           != after[z].mode;
+            if (!changed) continue;
+
+            s_cfg.update_cb(z, &after[z], s_cfg.update_cb_ctx);
             ESP_LOGD(TAG, "Zone %d: room=%.1f°C floor=%.1f°C sp=%.1f°C act=%d%% mode=%d",
                      z,
-                     snapshot[z].room_temp_cdeg  / 100.0f,
-                     snapshot[z].floor_temp_cdeg / 100.0f,
-                     snapshot[z].setpoint_cdeg   / 100.0f,
-                     snapshot[z].actuator_pct,
-                     snapshot[z].mode);
+                     after[z].room_temp_cdeg  / 100.0f,
+                     after[z].floor_temp_cdeg / 100.0f,
+                     after[z].setpoint_cdeg   / 100.0f,
+                     after[z].actuator_pct,
+                     after[z].mode);
         }
     }
 }
@@ -435,6 +468,25 @@ esp_err_t lk_ics2_init(const lk_ics2_config_t *cfg)
     }
 
     ESP_RETURN_ON_ERROR(uart_init(), TAG, "UART init failed");
+
+    // Validate configured zone count against the controller at startup.
+    // LK_REG_NUM_ZONES (0x0031) is an input register that reports how many
+    // zones the ICS 2 is configured with.  A mismatch means the bridge will
+    // either expose phantom zones or silently miss real ones.
+    {
+        uint16_t ctrl_zones = 0;
+        esp_err_t zret = modbus_read_input(LK_REG_NUM_ZONES, 1, &ctrl_zones);
+        if (zret != ESP_OK) {
+            ESP_LOGW(TAG, "Could not read zone count from ICS 2 (err=%s) - proceeding with configured value %d",
+                     esp_err_to_name(zret), s_cfg.num_zones);
+        } else if (ctrl_zones != s_cfg.num_zones) {
+            ESP_LOGW(TAG, "Zone count mismatch: ICS 2 reports %u zones, bridge configured for %u. "
+                     "Update CONFIG_LK_ICS2_NUM_ZONES in menuconfig to match.",
+                     (unsigned)ctrl_zones, (unsigned)s_cfg.num_zones);
+        } else {
+            ESP_LOGI(TAG, "Zone count confirmed: %u zones", (unsigned)ctrl_zones);
+        }
+    }
 
     // Start poll task on core 1 (or 0 for unicore), low priority
     BaseType_t ret = xTaskCreate(poll_task, "lk_ics2_poll",
