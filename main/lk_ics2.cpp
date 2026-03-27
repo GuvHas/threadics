@@ -307,6 +307,13 @@ static void poll_all_zones(void)
         return;
     }
 
+    // Snapshot the current state before any field writes so we can detect
+    // which zones actually changed and avoid pushing unchanged zones into Matter.
+    lk_ics2_zone_t before[LK_ICS2_MAX_ZONES];
+    xSemaphoreTake(s_zone_mutex, portMAX_DELAY);
+    for (uint8_t z = 0; z < n; z++) before[z] = s_zones[z];
+    xSemaphoreGive(s_zone_mutex);
+
     // Update s_zones[] directly, one field at a time, rather than buffering
     // in a snapshot and committing the whole struct at the end.  The snapshot
     // pattern creates a race: a write-through (lk_ics2_set_setpoint / _zone_mode)
@@ -353,20 +360,29 @@ static void poll_all_zones(void)
     // Snapshot for callbacks taken after all writes so it reflects the
     // freshest state, including any concurrent write-throughs.
     if (s_cfg.update_cb) {
-        lk_ics2_zone_t snapshot[LK_ICS2_MAX_ZONES];
+        lk_ics2_zone_t after[LK_ICS2_MAX_ZONES];
         xSemaphoreTake(s_zone_mutex, portMAX_DELAY);
-        for (uint8_t z = 0; z < n; z++) snapshot[z] = s_zones[z];
+        for (uint8_t z = 0; z < n; z++) after[z] = s_zones[z];
         xSemaphoreGive(s_zone_mutex);
 
         for (uint8_t z = 0; z < n; z++) {
-            s_cfg.update_cb(z, &snapshot[z], s_cfg.update_cb_ctx);
+            // Only push zones whose Matter-visible fields changed.  This avoids
+            // per-cycle heap allocation, CHIP task scheduling, and attribute
+            // writes for zones that are in steady state.
+            bool changed = !before[z].valid                             ||
+                           before[z].room_temp_cdeg != after[z].room_temp_cdeg ||
+                           before[z].setpoint_cdeg  != after[z].setpoint_cdeg  ||
+                           before[z].mode           != after[z].mode;
+            if (!changed) continue;
+
+            s_cfg.update_cb(z, &after[z], s_cfg.update_cb_ctx);
             ESP_LOGD(TAG, "Zone %d: room=%.1f°C floor=%.1f°C sp=%.1f°C act=%d%% mode=%d",
                      z,
-                     snapshot[z].room_temp_cdeg  / 100.0f,
-                     snapshot[z].floor_temp_cdeg / 100.0f,
-                     snapshot[z].setpoint_cdeg   / 100.0f,
-                     snapshot[z].actuator_pct,
-                     snapshot[z].mode);
+                     after[z].room_temp_cdeg  / 100.0f,
+                     after[z].floor_temp_cdeg / 100.0f,
+                     after[z].setpoint_cdeg   / 100.0f,
+                     after[z].actuator_pct,
+                     after[z].mode);
         }
     }
 }
