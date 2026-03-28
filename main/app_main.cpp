@@ -182,6 +182,12 @@ void setupSrpHost(otInstance *ot)
              ext->m8[4], ext->m8[5], ext->m8[6], ext->m8[7]);
     otSrpClientSetHostName(ot, s_srp.hostname);
     otSrpClientEnableAutoHostAddress(ot);
+    // Enable auto-start so the SRP client discovers the OTBR's SRP server
+    // from Thread Network Data and begins sending registrations automatically.
+    // Without this the client is configured but never contacts the SRP server,
+    // so _matter._tcp is never proxied by the OTBR and the commissioner cannot
+    // reconnect for the post-AddNOC CASE session or after any power cycle.
+    otSrpClientEnableAutoStartMode(ot, nullptr, nullptr);
 }
 
 void trySrpServiceAdd(otInstance *ot,
@@ -281,7 +287,13 @@ static SrpFabricDelegate s_fabricDelegate;
 
 void onThreadStateChanged(uint32_t flags, void *ctx)
 {
-    if (!(flags & OT_CHANGED_THREAD_ROLE)) return;
+    // Trigger on role change OR mesh-local address assignment.
+    // After an NVS-restored reboot the device may re-join with its previous
+    // role unchanged, so OT_CHANGED_THREAD_ROLE never fires; however the
+    // mesh-local address is always (re-)assigned, making ML_ADDR the
+    // reliable signal that Thread is operational and SRP can be started.
+    const uint32_t kTrigger = OT_CHANGED_THREAD_ROLE | OT_CHANGED_THREAD_ML_ADDR;
+    if (!(flags & kTrigger)) return;
     auto *ot = static_cast<otInstance *>(ctx);
     chip::DeviceLayer::PlatformMgr().ScheduleWork(
         [](intptr_t p) { trySrpServiceAdd(reinterpret_cast<otInstance *>(p)); },
