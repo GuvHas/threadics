@@ -9,6 +9,11 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_err.h"
+#include "nvs.h"
+
+static const char *NVS_PARTITION = "nvs";
+static const char *NVS_NAMESPACE = "lk_bridge";
+static const char *NVS_KEY_ZONES = "num_zones";
 
 static const char *TAG = "lk_ics2";
 
@@ -21,6 +26,7 @@ static lk_ics2_zone_t    s_zones[LK_ICS2_MAX_ZONES];
 static SemaphoreHandle_t s_zone_mutex;     // protects s_zones[] cache
 static SemaphoreHandle_t s_bus_mutex;      // serialises all RS485/Modbus transactions
 static TaskHandle_t      s_poll_task;
+static bool              s_uart_initialized = false;
 
 // ============================================================
 // Modbus RTU helpers
@@ -404,6 +410,8 @@ static void poll_task(void *arg)
 
 static esp_err_t uart_init(void)
 {
+    if (s_uart_initialized) return ESP_OK;
+
     uart_config_t uart_cfg = {
         .baud_rate  = s_cfg.baud_rate,
         .data_bits  = UART_DATA_8_BITS,
@@ -445,12 +453,74 @@ static esp_err_t uart_init(void)
     ESP_LOGI(TAG, "RS485 UART%d init: baud=%d TX=%d RX=%d DE=%d",
              s_cfg.uart_port, s_cfg.baud_rate,
              s_cfg.tx_pin, s_cfg.rx_pin, s_cfg.de_pin);
+    s_uart_initialized = true;
     return ESP_OK;
 }
 
 // ============================================================
 // Public API
 // ============================================================
+
+esp_err_t lk_ics2_probe_num_zones(const lk_ics2_config_t *cfg, uint8_t *count)
+{
+    if (!cfg || !count) return ESP_ERR_INVALID_ARG;
+
+    // Start with config default as last-resort fallback.
+    *count = cfg->num_zones;
+
+    // Try NVS cache from the last successful probe as intermediate fallback.
+    nvs_handle_t h;
+    uint8_t nvs_zones = 0;
+    bool has_nvs = false;
+    if (nvs_open_from_partition(NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        if (nvs_get_u8(h, NVS_KEY_ZONES, &nvs_zones) == ESP_OK &&
+                nvs_zones >= 1 && nvs_zones <= LK_ICS2_MAX_ZONES) {
+            has_nvs = true;
+            *count = nvs_zones;
+        }
+        nvs_close(h);
+    }
+
+    // Initialise the hardware so we can do a Modbus read.
+    memcpy(&s_cfg, cfg, sizeof(s_cfg));
+    if (!s_bus_mutex) {
+        s_bus_mutex = xSemaphoreCreateMutex();
+        if (!s_bus_mutex) {
+            ESP_LOGW(TAG, "Probe: no memory for mutex, using %s: %d zones",
+                     has_nvs ? "NVS cache" : "config default", *count);
+            return ESP_FAIL;
+        }
+    }
+    if (uart_init() != ESP_OK) {
+        ESP_LOGW(TAG, "Probe: UART init failed, using %s: %d zones",
+                 has_nvs ? "NVS cache" : "config default", *count);
+        return ESP_FAIL;
+    }
+
+    // Ask the ICS 2 how many zones it has configured.
+    uint16_t ctrl_zones = 0;
+    esp_err_t ret = modbus_read_input(LK_REG_NUM_ZONES, 1, &ctrl_zones);
+    if (ret != ESP_OK || ctrl_zones == 0 || ctrl_zones > LK_ICS2_MAX_ZONES) {
+        ESP_LOGW(TAG, "Probe: ICS 2 not reachable (err=%s), using %s: %d zones",
+                 esp_err_to_name(ret), has_nvs ? "NVS cache" : "config default", *count);
+        return ESP_FAIL;
+    }
+
+    *count = (uint8_t)ctrl_zones;
+    ESP_LOGI(TAG, "Probe: ICS 2 reports %d zone(s)", *count);
+
+    // Persist the result so future boots can fall back to it if the ICS 2 is
+    // momentarily unreachable (e.g. powered off while the ESP32 is booting).
+    if (!has_nvs || nvs_zones != *count) {
+        if (nvs_open_from_partition(NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+            nvs_set_u8(h, NVS_KEY_ZONES, *count);
+            nvs_commit(h);
+            nvs_close(h);
+            ESP_LOGI(TAG, "Probe: cached zone count %d to NVS", *count);
+        }
+    }
+    return ESP_OK;
+}
 
 esp_err_t lk_ics2_init(const lk_ics2_config_t *cfg)
 {
@@ -461,8 +531,8 @@ esp_err_t lk_ics2_init(const lk_ics2_config_t *cfg)
     memcpy(&s_cfg, cfg, sizeof(s_cfg));
     memset(s_zones, 0, sizeof(s_zones));
 
-    s_zone_mutex = xSemaphoreCreateMutex();
-    s_bus_mutex  = xSemaphoreCreateMutex();
+    if (!s_zone_mutex) s_zone_mutex = xSemaphoreCreateMutex();
+    if (!s_bus_mutex)  s_bus_mutex  = xSemaphoreCreateMutex();
     if (!s_zone_mutex || !s_bus_mutex) {
         return ESP_ERR_NO_MEM;
     }
