@@ -87,6 +87,24 @@ typedef struct {
 } lk_ics2_config_t;
 
 /**
+ * @brief  Probe the ICS 2 for the number of configured zones.
+ *
+ * Must be called before lk_ics2_init(). Initialises the UART and performs a
+ * single Modbus read of LK_REG_NUM_ZONES (0x0031). Falls back to a
+ * NVS-cached value from the last successful probe if the ICS 2 is unreachable,
+ * then to cfg->num_zones as a last resort.
+ *
+ * The result should be used as the num_zones field for both the subsequent
+ * lk_ics2_init() call and for Matter endpoint creation so that exactly the
+ * right number of thermostat endpoints is exposed to Home Assistant.
+ *
+ * @param  cfg    Driver hardware config (uart/pin/baud used; num_zones is fallback).
+ * @param  count  Output: zone count. Always written, never 0.
+ * @return ESP_OK if the ICS 2 responded; ESP_FAIL if a fallback was used.
+ */
+esp_err_t lk_ics2_probe_num_zones(const lk_ics2_config_t *cfg, uint8_t *count);
+
+/**
  * @brief  Initialize the LK ICS 2 Modbus driver and start the poll task.
  *
  * @param  cfg  Driver configuration. Caller owns the struct (copied internally).

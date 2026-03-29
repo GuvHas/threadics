@@ -389,10 +389,31 @@ extern "C" void app_main()
     }
     ESP_ERROR_CHECK(nvs_matter_err);
 
+    // Probe the ICS 2 for its actual zone count before creating Matter endpoints.
+    // The UART is initialised here; lk_ics2_init() (called after Matter starts)
+    // will reuse it.  Falls back to NVS-cached count then CONFIG default if the
+    // ICS 2 is unreachable at boot time.
+    lk_ics2_config_t lk_cfg = {
+        .uart_port           = CONFIG_LK_ICS2_UART_PORT,
+        .tx_pin              = CONFIG_LK_ICS2_UART_TX_PIN,
+        .rx_pin              = CONFIG_LK_ICS2_UART_RX_PIN,
+        .de_pin              = CONFIG_LK_ICS2_RS485_DE_PIN,
+        .baud_rate           = CONFIG_LK_ICS2_MODBUS_BAUD_RATE,
+        .slave_addr          = (uint8_t)CONFIG_LK_ICS2_MODBUS_SLAVE_ADDR,
+        .num_zones           = (uint8_t)CONFIG_LK_ICS2_NUM_ZONES,
+        .poll_interval_ms    = CONFIG_LK_ICS2_POLL_INTERVAL_MS,
+        .response_timeout_ms = CONFIG_LK_ICS2_MODBUS_TIMEOUT_MS,
+        .update_cb           = lk_zone_update_cb,
+        .update_cb_ctx       = nullptr,
+    };
+    uint8_t num_zones = CONFIG_LK_ICS2_NUM_ZONES;
+    lk_ics2_probe_num_zones(&lk_cfg, &num_zones);
+    lk_cfg.num_zones = num_zones;
+
     // Create Matter node with one thermostat endpoint per heating zone.
     // The attribute callback (setpoint/mode writes from HA → ICS 2) is
     // registered here via matter_device_init().
-    ESP_ERROR_CHECK(matter_device_init(CONFIG_LK_ICS2_NUM_ZONES));
+    ESP_ERROR_CHECK(matter_device_init(num_zones));
 
     // OpenThread native radio (802.15.4 built into ESP32-C6).
     static esp_openthread_platform_config_t ot_platform_config = {
@@ -415,19 +436,7 @@ extern "C" void app_main()
 
     // Start the LK ICS 2 Modbus poll task now that the CHIP task is running
     // and ScheduleWork() is available for the zone-update callback.
-    lk_ics2_config_t lk_cfg = {
-        .uart_port           = CONFIG_LK_ICS2_UART_PORT,
-        .tx_pin              = CONFIG_LK_ICS2_UART_TX_PIN,
-        .rx_pin              = CONFIG_LK_ICS2_UART_RX_PIN,
-        .de_pin              = CONFIG_LK_ICS2_RS485_DE_PIN,
-        .baud_rate           = CONFIG_LK_ICS2_MODBUS_BAUD_RATE,
-        .slave_addr          = (uint8_t)CONFIG_LK_ICS2_MODBUS_SLAVE_ADDR,
-        .num_zones           = (uint8_t)CONFIG_LK_ICS2_NUM_ZONES,
-        .poll_interval_ms    = CONFIG_LK_ICS2_POLL_INTERVAL_MS,
-        .response_timeout_ms = CONFIG_LK_ICS2_MODBUS_TIMEOUT_MS,
-        .update_cb           = lk_zone_update_cb,
-        .update_cb_ctx       = nullptr,
-    };
+    // lk_cfg was built and probed before Matter init above.
     ESP_ERROR_CHECK(lk_ics2_init(&lk_cfg));
     ESP_LOGI(kTag, "LK ICS 2 Modbus driver started (%d zones, slave=%d)",
              lk_cfg.num_zones, lk_cfg.slave_addr);
