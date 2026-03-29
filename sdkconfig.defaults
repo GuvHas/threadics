@@ -44,6 +44,10 @@ CONFIG_FREERTOS_HZ=1000
 # Matter device identity shown in Home Assistant and other controllers.
 CONFIG_DEVICE_PRODUCT_NAME="LK ICS2 Matter Bridge"
 
+# Number of heating zones to expose as Matter thermostat endpoints.
+# Set this to match the actual number of zones wired to the ICS 2.
+CONFIG_LK_ICS2_NUM_ZONES=1
+
 # Matter + logging defaults
 CONFIG_ESP_MATTER_ENABLE_DATA_MODEL=y
 CONFIG_LOG_DEFAULT_LEVEL=2
