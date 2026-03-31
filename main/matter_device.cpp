@@ -124,6 +124,9 @@ esp_err_t matter_device_init(uint8_t num_zones)
     s_num_zones = num_zones;
 
     node::config_t node_cfg{};
+    snprintf(node_cfg.root_node.basic_information.node_label,
+             sizeof(node_cfg.root_node.basic_information.node_label),
+             "LK Floor heating");
     node_t *node = node::create(&node_cfg, attribute_update_cb, identification_cb);
     if (!node) {
         ESP_LOGE(TAG, "Failed to create Matter node");
