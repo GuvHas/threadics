@@ -42,7 +42,7 @@ CONFIG_ENABLE_WIFI_STATION=n
 CONFIG_FREERTOS_HZ=1000
 
 # Matter device identity shown in Home Assistant and other controllers.
-CONFIG_DEVICE_PRODUCT_NAME="LK ICS2 Matter Bridge"
+CONFIG_DEVICE_PRODUCT_NAME="LK Floor heating"
 
 # Matter + logging defaults
 CONFIG_ESP_MATTER_ENABLE_DATA_MODEL=y
