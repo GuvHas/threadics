@@ -44,6 +44,14 @@ CONFIG_FREERTOS_HZ=1000
 # Matter device identity shown in Home Assistant and other controllers.
 CONFIG_DEVICE_PRODUCT_NAME="LK Floor heating"
 
+# RS485 pin mapping for Seeed XIAO ESP32-C6 top header (no soldering required).
+# D0=GPIO0 (TX), D1=GPIO1 (RX).  DE stays on GPIO10 (internal, not exposed on
+# any header pad) — the Waveshare TTL->RS485 (C) module drives DE automatically
+# from the TX line, so nothing needs to be connected to the DE pin.
+CONFIG_LK_ICS2_UART_TX_PIN=0
+CONFIG_LK_ICS2_UART_RX_PIN=1
+CONFIG_LK_ICS2_RS485_DE_PIN=10
+
 # Matter + logging defaults
 CONFIG_ESP_MATTER_ENABLE_DATA_MODEL=y
 CONFIG_LOG_DEFAULT_LEVEL=2
