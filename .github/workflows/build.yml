@@ -6,11 +6,21 @@ on:
   pull_request:
     branches: ["**"]
 
+# One build at a time per branch. When a PR is opened for a branch that has a
+# push build still running, the push build is cancelled and the pull_request
+# build (which checks out the merge ref) takes over. If the push build already
+# finished, the PR build simply runs and validates the merge result.
+# github.head_ref is set on pull_request events (the branch name);
+# github.ref_name is used for push events (also the branch name).
+concurrency:
+  group: build-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    # On pull_request events from the same repo the push event already ran a build
-    # for the same commit, so skip to avoid building twice. Still run for forks
-    # (external PRs) where no push event fires in this repo.
+    # Still skip pull_request builds from external forks: those don't have a
+    # corresponding push event in this repo, so no cancellation is possible and
+    # we do want CI to run for them.
     if: >
       github.event_name == 'push' ||
       github.event.pull_request.head.repo.full_name != github.repository
